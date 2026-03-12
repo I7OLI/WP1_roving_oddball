@@ -1,0 +1,30 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# IDE
+.idea/
+.vscode/
+*.iml
+
+# Experiment output (generated files — don't commit these)
+sequences/
+WP1_sequences_n*/
+WP1_sub*.json
+WP1_sub*.csv
+
+# OS
+.DS_Store
+Thumbs.db
