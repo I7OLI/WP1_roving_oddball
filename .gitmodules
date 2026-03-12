@@ -1,0 +1,3 @@
+[submodule "freefield"]
+	path = freefield
+	url = https://github.com/I7OLI/freefield.git
