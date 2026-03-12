@@ -20,7 +20,12 @@ slab.set_default_samplerate(fs)
 rcx_file = 'bi_play_buf.rcx'
 procsser = 'RP2'
 
-
+ff.initialize(
+        setup='headphones',
+        device=[['RP2', procsser, ff.DIR / 'data' / 'rcx' / rcx_file]],
+        zbus=True,
+        connection='GB'
+    )
 # ============================================================================
 # SOUND CREATION (from JSON trial data)
 # ============================================================================
@@ -195,14 +200,6 @@ if __name__ == '__main__':
     with open(seq_file) as f:
         data = json.load(f)
 
-    ff.initialize(
-        setup='headphones',
-        device=[['RX81', 'RX8', ff.DIR / 'data' / 'rcx' / 'bits.rcx'],
-                ['RX82', 'RX8', ff.DIR / 'data' / 'rcx' / 'bits.rcx'],
-                ['RP2', procsser, ff.DIR / 'data' / 'rcx' / rcx_file]],
-        zbus=True,
-        connection='GB'
-    )
 
     meta = data['metadata']
     participant_id = meta['participant_id']
