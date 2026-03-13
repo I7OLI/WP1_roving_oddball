@@ -23,8 +23,8 @@ procsser = 'RP2'
 ff.initialize(
         setup='headphones',
         device=[['RP2', procsser, ff.DIR / 'data' / 'rcx' / rcx_file]],
-        zbus=True,
-        connection='GB'
+        zbus=False,
+        connection='usb'
     )
 # ============================================================================
 # SOUND CREATION (from JSON trial data)
