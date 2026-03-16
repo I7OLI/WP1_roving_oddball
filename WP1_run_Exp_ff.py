@@ -20,12 +20,17 @@ slab.set_default_samplerate(fs)
 rcx_file = 'bi_play_buf.rcx'
 procsser = 'RP2'
 
+
+proc_list = [['RP2', 1, ff.DIR / 'data' / 'rcx' / rcx_file]]
+
+#ff.initialize('headphones', device=proc_list)
+
 ff.initialize(
         setup='headphones',
         device=[['RP2', procsser, ff.DIR / 'data' / 'rcx' / rcx_file]],
         zbus=False,
         connection='usb'
-    )
+   )
 # ============================================================================
 # SOUND CREATION (from JSON trial data)
 # ============================================================================
