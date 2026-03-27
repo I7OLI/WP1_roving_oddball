@@ -21,7 +21,7 @@ rcx_file = 'shock.rcx'
 procsser = 'RM1'
 
 
-proc_list = [['RP2', 1, ff.DIR / 'data' / 'rcx' / rcx_file]]
+#proc_list = [['RP2', 1, ff.DIR / 'data' / 'rcx' / rcx_file]]
 
 #ff.initialize('headphones', device=proc_list)
 
