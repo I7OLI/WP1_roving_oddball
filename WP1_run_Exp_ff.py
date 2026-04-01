@@ -77,7 +77,7 @@ def create_sounds(trials, experiment_type, tone_duration):
 # ============================================================================
 
 def run_block(sequence, stimuli, experiment_type, block_num, block_label,
-              participant_id, cs_plus_value, ITI, trial_log,
+              participant_id, cs_plus_value, ITI, tone_duration, trial_log,
               reinforcement=None, shock_onset=0.15, max_cumsum=4,
               iti_within_pattern=0.05):
     """Play one block and log all trials."""
@@ -127,15 +127,21 @@ def run_block(sequence, stimuli, experiment_type, block_num, block_label,
             if shock_delivered:
                 shock_wait = max(0, shock_onset - time_elapsed)
                 time.sleep(shock_wait)
-                ff.write('shock',1, procsser)
+                print("  >>> SHOCK <<<")
+                ff.write('shock', 1, procsser)
+                ff.write('shock', 0, procsser)
                 elapsed = time.time() - time1
                 remaining = max(0, ITI - elapsed)
                 time.sleep(remaining)
             else:
                 time.sleep(max(0, ITI - time_elapsed))
 
+            # ff.play falls back to SoftTrg(1) when zbus=False.
+            # time.sleep(tone_duration) replaces ff.wait_to_finish_playing(),
+            # which polls a 'playback' tag that shock.rcx may not expose —
+            # causing it to return immediately and shift sounds one tone forward.
             ff.play('zBusA')
-            ff.wait_to_finish_playing()
+            time.sleep(tone_duration)
             stimulus_value = values[i]
 
         elif experiment_type == 'a':
@@ -151,7 +157,7 @@ def run_block(sequence, stimuli, experiment_type, block_num, block_label,
                 ff.write('data_r', tone.data, procsser)
                 ff.write('chan_r', 2, procsser)
                 ff.play('zBusA')
-                ff.wait_to_finish_playing()
+                time.sleep(tone_duration)
                 if tone_idx < len(pattern_tones) - 1:
                     time.sleep(iti_within_pattern)
             stimulus_value = base_freq
@@ -160,7 +166,9 @@ def run_block(sequence, stimuli, experiment_type, block_num, block_label,
             if shock_delivered:
                 time.sleep(shock_onset)
                 print("  >>> SHOCK <<<")
-                time.sleep(ITI - shock_onset)
+                ff.write('shock', 1, procsser)
+                ff.write('shock', 0, procsser)
+                time.sleep(max(0, ITI - shock_onset))
             else:
                 time.sleep(ITI)
 
@@ -257,6 +265,7 @@ if __name__ == '__main__':
             participant_id=participant_id,
             cs_plus_value=cs_plus_value,
             ITI=ITI,
+            tone_duration=tone_duration,
             trial_log=trial_log,
             reinforcement=reinforcement,
             shock_onset=shock_onset,
