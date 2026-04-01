@@ -122,16 +122,17 @@ def run_block(sequence, stimuli, experiment_type, block_num, block_label,
             ff.write('data_r', tones[i].data, procsser)
             ff.write('chan_r', 2, procsser)
             time2 = time.time()
+            time_elapsed = time2 - time1
 
             if shock_delivered:
-                shock_wait = max(0, shock_onset - (time2 - time1))
+                shock_wait = max(0, shock_onset - time_elapsed)
                 time.sleep(shock_wait)
-                print("  >>> SHOCK <<<")
+                ff.write('shock',1, procsser)
                 elapsed = time.time() - time1
                 remaining = max(0, ITI - elapsed)
                 time.sleep(remaining)
             else:
-                time.sleep(max(0, ITI + time1 - time2))
+                time.sleep(max(0, ITI - time_elapsed))
 
             ff.play('zBusA')
             ff.wait_to_finish_playing()
