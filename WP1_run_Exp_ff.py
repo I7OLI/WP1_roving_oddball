@@ -127,9 +127,7 @@ def run_block(sequence, stimuli, experiment_type, block_num, block_label,
             if shock_delivered:
                 shock_wait = max(0, shock_onset - time_elapsed)
                 time.sleep(shock_wait)
-                print("  >>> SHOCK <<<")
-                ff.write('shock', 1, procsser)
-                ff.write('shock', 0, procsser)
+                ff.play(2,[procsser])
                 elapsed = time.time() - time1
                 remaining = max(0, ITI - elapsed)
                 time.sleep(remaining)
@@ -140,7 +138,7 @@ def run_block(sequence, stimuli, experiment_type, block_num, block_label,
             # time.sleep(tone_duration) replaces ff.wait_to_finish_playing(),
             # which polls a 'playback' tag that shock.rcx may not expose —
             # causing it to return immediately and shift sounds one tone forward.
-            ff.play('zBusA')
+            ff.play(1,[procsser])
             time.sleep(tone_duration)
             stimulus_value = values[i]
 
@@ -156,7 +154,7 @@ def run_block(sequence, stimuli, experiment_type, block_num, block_label,
                 ff.write('chan_l', 1, procsser)
                 ff.write('data_r', tone.data, procsser)
                 ff.write('chan_r', 2, procsser)
-                ff.play('zBusA')
+                ff.play(1,[procsser])
                 time.sleep(tone_duration)
                 if tone_idx < len(pattern_tones) - 1:
                     time.sleep(iti_within_pattern)
@@ -165,9 +163,8 @@ def run_block(sequence, stimuli, experiment_type, block_num, block_label,
             # --- Shock during ITI ---
             if shock_delivered:
                 time.sleep(shock_onset)
-                print("  >>> SHOCK <<<")
-                ff.write('shock', 1, procsser)
-                ff.write('shock', 0, procsser)
+                ff.play(2, [procsser])
+                #ff.write('shock', 0, procsser)
                 time.sleep(max(0, ITI - shock_onset))
             else:
                 time.sleep(ITI)
