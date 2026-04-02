@@ -9,6 +9,7 @@ import os
 import json
 import time
 import csv
+import numpy as np
 import slab
 import freefield as ff
 
@@ -20,11 +21,6 @@ slab.set_default_samplerate(fs)
 rcx_file = 'shock.rcx'
 procsser = 'RM1'
 
-
-#proc_list = [['RP2', 1, ff.DIR / 'data' / 'rcx' / rcx_file]]
-
-#ff.initialize('headphones', device=proc_list)
-
 ff.initialize(
         setup='headphones',
         device=[['RM1', procsser, rcx_file]],
@@ -35,12 +31,14 @@ ff.initialize(
 # SOUND CREATION (from JSON trial data)
 # ============================================================================
 
-def create_sounds(trials, experiment_type, tone_duration):
+def create_sounds(trials, experiment_type, tone_duration, iti_within_pattern=0.05):
     """
     Create slab.Sound objects from pre-resolved JSON trial data.
 
     For f/p:  returns (tones, values, indices)
-    For a:    returns (patterns_to_play, pattern_info)
+    For a:    returns (patterns, pattern_info)
+              Each pattern is a single combined slab.Sound:
+              [tone1 | silence | tone2 | ...] loaded as one buffer.
     """
     if experiment_type in ['f', 'p']:
         tones = []
@@ -60,16 +58,28 @@ def create_sounds(trials, experiment_type, tone_duration):
         return tones, values, indices
 
     elif experiment_type == 'a':
-        patterns_to_play = []
+        patterns = []
         pattern_info = []
+        silence_samples = int(iti_within_pattern * slab.get_default_samplerate())
         for t in trials:
             pattern_tones = [
                 slab.Sound.tone(frequency=f, duration=tone_duration).ramp('offset', 0.01)
                 for f in t['frequencies']
             ]
-            patterns_to_play.append((pattern_tones, t['pattern_name'], t['base_freq']))
+            # Concatenate tones with silence between them into one buffer.
+            # Single write + single SoftTrg means within-pattern timing is
+            # hardware-precise rather than controlled by Python sleeps.
+            n_ch = pattern_tones[0].data.shape[1]
+            parts = []
+            for idx, tone in enumerate(pattern_tones):
+                parts.append(tone.data)
+                if idx < len(pattern_tones) - 1:
+                    parts.append(np.zeros((silence_samples, n_ch)))
+            combined = slab.Sound(np.vstack(parts),
+                                  samplerate=slab.get_default_samplerate())
+            patterns.append(combined)
             pattern_info.append(t)
-        return patterns_to_play, pattern_info
+        return patterns, pattern_info
 
 
 # ============================================================================
@@ -87,13 +97,23 @@ def run_block(sequence, stimuli, experiment_type, block_num, block_label,
 
     cs_minus_value = -cs_plus_value
 
-    # Unpack stimuli
+    # Unpack stimuli and pre-load first buffer
     if experiment_type in ['f', 'p']:
         tones, values, indices = stimuli
         value_label = "freq" if experiment_type == 'f' else "azimuth"
         value_unit = "Hz" if experiment_type == 'f' else "deg"
+        ff.write('playbuflen', len(tones[0]), procsser)
+        ff.write('data_l', tones[0].data, procsser)
+        ff.write('chan_l', 1, procsser)
+        ff.write('data_r', tones[0].data, procsser)
+        ff.write('chan_r', 2, procsser)
     elif experiment_type == 'a':
-        patterns_to_play, pattern_info = stimuli
+        patterns, pattern_info = stimuli
+        ff.write('playbuflen', len(patterns[0]), procsser)
+        ff.write('data_l', patterns[0].data, procsser)
+        ff.write('chan_l', 1, procsser)
+        ff.write('data_r', patterns[0].data, procsser)
+        ff.write('chan_r', 2, procsser)
 
     for i in range(len(sequence)):
         t_onset = time.time()
@@ -110,64 +130,78 @@ def run_block(sequence, stimuli, experiment_type, block_num, block_label,
 
         # --- Print + play (type-specific) ---
         if experiment_type in ['f', 'p']:
+
+            ff.play(1, [procsser])
+            time.sleep(tone_duration)
+            stimulus_value = values[i]
+
             print(f"Tone {i + 1:3d}/{len(sequence)}: {marker} {cs_label:>3s} | "
                   f"{value_label}={values[i]:7.1f} {value_unit} | "
                   f"index={indices[i] - max_cumsum}"
                   f"{' | SHOCK' if shock_delivered else ''}")
 
+            # time1 = tone offset; time_elapsed updated if a write happens
             time1 = time.time()
-            ff.write('playbuflen', len(tones[i]), procsser)
-            ff.write('data_l', tones[i].data, procsser)
-            ff.write('chan_l', 1, procsser)
-            ff.write('data_r', tones[i].data, procsser)
-            ff.write('chan_r', 2, procsser)
-            time2 = time.time()
-            time_elapsed = time2 - time1
+            time_elapsed = 0
+            if i + 1 < len(tones):
+                ff.write('playbuflen', len(tones[i+1]), procsser)
+                ff.write('data_l', tones[i+1].data, procsser)
+                ff.write('chan_l', 1, procsser)
+                ff.write('data_r', tones[i+1].data, procsser)
+                ff.write('chan_r', 2, procsser)
+                time_elapsed = time.time() - time1
+
+            # Pre-tone silence = SOA - tone_duration (ITI in JSON is the full SOA)
+            pre_tone_silence = ITI - tone_duration
 
             if shock_delivered:
                 shock_wait = max(0, shock_onset - time_elapsed)
                 time.sleep(shock_wait)
                 ff.play(2,[procsser])
                 elapsed = time.time() - time1
-                remaining = max(0, ITI - elapsed)
+                remaining = max(0, pre_tone_silence - elapsed)
                 time.sleep(remaining)
             else:
-                time.sleep(max(0, ITI - time_elapsed))
+                time.sleep(max(0, pre_tone_silence - time_elapsed))
 
             # ff.play falls back to SoftTrg(1) when zbus=False.
             # time.sleep(tone_duration) replaces ff.wait_to_finish_playing(),
             # which polls a 'playback' tag that shock.rcx may not expose —
             # causing it to return immediately and shift sounds one tone forward.
-            ff.play(1,[procsser])
-            time.sleep(tone_duration)
-            stimulus_value = values[i]
+
 
         elif experiment_type == 'a':
-            pattern_tones, pattern_name, base_freq = patterns_to_play[i]
-            freqs_str = '-'.join([f"{f:.0f}" for f in pattern_info[i]['frequencies']])
-            print(f"Trial {i + 1:3d}/{len(sequence)}: {marker} {cs_label:>3s} | "
-                  f"{pattern_name:>8s} | base={base_freq:.0f}Hz tones={freqs_str}"
-                  f"{' | SHOCK' if shock_delivered else ''}")
-            for tone_idx, tone in enumerate(pattern_tones):
-                ff.write('playbuflen', len(tone), procsser)
-                ff.write('data_l', tone.data, procsser)
-                ff.write('chan_l', 1, procsser)
-                ff.write('data_r', tone.data, procsser)
-                ff.write('chan_r', 2, procsser)
-                ff.play(1,[procsser])
-                time.sleep(tone_duration)
-                if tone_idx < len(pattern_tones) - 1:
-                    time.sleep(iti_within_pattern)
-            stimulus_value = base_freq
+            info = pattern_info[i]
+            freqs_str = '-'.join([f"{f:.0f}" for f in info['frequencies']])
 
-            # --- Shock during ITI ---
+            # Play combined buffer (all tones + within-pattern gaps in one shot)
+            ff.play(1, [procsser])
+            time.sleep(patterns[i].duration)
+            stimulus_value = info['base_freq']
+
+            print(f"Trial {i + 1:3d}/{len(sequence)}: {marker} {cs_label:>3s} | "
+                  f"{info['pattern_name']:>8s} | base={info['base_freq']:.0f}Hz "
+                  f"tones={freqs_str}{' | SHOCK' if shock_delivered else ''}")
+
+            # ITI: write next pattern buffer, then shock
+            time1 = time.time()
+            time_elapsed = 0
+            if i + 1 < len(patterns):
+                ff.write('playbuflen', len(patterns[i+1]), procsser)
+                ff.write('data_l', patterns[i+1].data, procsser)
+                ff.write('chan_l', 1, procsser)
+                ff.write('data_r', patterns[i+1].data, procsser)
+                ff.write('chan_r', 2, procsser)
+                time_elapsed = time.time() - time1
+
+            post_pattern_gap = ITI - tone_duration
             if shock_delivered:
-                time.sleep(shock_onset)
+                time.sleep(max(0, shock_onset - time_elapsed))
                 ff.play(2, [procsser])
-                #ff.write('shock', 0, procsser)
-                time.sleep(max(0, ITI - shock_onset))
+                elapsed = time.time() - time1
+                time.sleep(max(0, post_pattern_gap - elapsed))
             else:
-                time.sleep(ITI)
+                time.sleep(max(0, post_pattern_gap - time_elapsed))
 
         # --- Log trial ---
         trial_log.append({
@@ -248,7 +282,8 @@ if __name__ == '__main__':
         print(f"    {len(seq)} trials, {n_devs} deviants")
 
         # Create slab.Sound objects from pre-resolved trial data
-        stimuli = create_sounds(block_data['trials'], experiment_type, tone_duration)
+        stimuli = create_sounds(block_data['trials'], experiment_type,
+                                tone_duration, iti_within_pattern)
 
         print(f"\nPress Enter to start BLOCK {block_num} ({label})...")
         input()
