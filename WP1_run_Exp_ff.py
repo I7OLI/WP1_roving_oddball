@@ -47,6 +47,7 @@ def create_sounds(trials, experiment_type, tone_duration, iti_within_pattern=0.0
         for t in trials:
             if experiment_type == 'f':
                 tone = slab.Sound.tone(frequency=t['value'], duration=tone_duration)
+                tone = slab.Binaural(tone)
                 tone = tone.ramp('offset', 0.02)
             else:  # 'p'
                 tone = slab.Sound.tone(frequency=700, duration=tone_duration, n_channels=2)
@@ -133,7 +134,6 @@ def run_block(sequence, stimuli, experiment_type, block_num, block_label,
 
             ff.play(1, [procsser])
             ff.wait_to_finish_playing()
-            time.sleep(tone_duration)
             stimulus_value = values[i]
 
             print(f"Tone {i + 1:3d}/{len(sequence)}: {marker} {cs_label:>3s} | "
@@ -167,15 +167,15 @@ def run_block(sequence, stimuli, experiment_type, block_num, block_label,
 
 
         elif experiment_type == 'a':
+
             info = pattern_info[i]
             freqs_str = '-'.join([f"{f:.0f}" for f in info['frequencies']])
 
             # Play combined buffer (all tones + within-pattern gaps in one shot)
             ff.play(1, [procsser])
             ff.wait_to_finish_playing()
-            time.sleep(patterns[i].duration)
-            stimulus_value = info['base_freq']
 
+            stimulus_value = info['base_freq']
             print(f"Trial {i + 1:3d}/{len(sequence)}: {marker} {cs_label:>3s} | "
                   f"{info['pattern_name']:>8s} | base={info['base_freq']:.0f}Hz "
                   f"tones={freqs_str}{' | SHOCK' if shock_delivered else ''}")
