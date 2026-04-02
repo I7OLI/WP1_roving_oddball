@@ -103,9 +103,9 @@ def run_block(sequence, stimuli, experiment_type, block_num, block_label,
         value_label = "freq" if experiment_type == 'f' else "azimuth"
         value_unit = "Hz" if experiment_type == 'f' else "deg"
         ff.write('playbuflen', len(tones[0]), procsser)
-        ff.write('data_l', tones[0].data, procsser)
+        ff.write('data_l', tones[0].left.data, procsser)
         ff.write('chan_l', 1, procsser)
-        ff.write('data_r', tones[0].data, procsser)
+        ff.write('data_r', tones[0].right.data, procsser)
         ff.write('chan_r', 2, procsser)
     elif experiment_type == 'a':
         patterns, pattern_info = stimuli
@@ -132,6 +132,7 @@ def run_block(sequence, stimuli, experiment_type, block_num, block_label,
         if experiment_type in ['f', 'p']:
 
             ff.play(1, [procsser])
+            ff.wait_to_finish_playing()
             time.sleep(tone_duration)
             stimulus_value = values[i]
 
@@ -145,9 +146,9 @@ def run_block(sequence, stimuli, experiment_type, block_num, block_label,
             time_elapsed = 0
             if i + 1 < len(tones):
                 ff.write('playbuflen', len(tones[i+1]), procsser)
-                ff.write('data_l', tones[i+1].data, procsser)
+                ff.write('data_l', tones[i+1].left.data, procsser)
                 ff.write('chan_l', 1, procsser)
-                ff.write('data_r', tones[i+1].data, procsser)
+                ff.write('data_r', tones[i+1].right.data, procsser)
                 ff.write('chan_r', 2, procsser)
                 time_elapsed = time.time() - time1
 
@@ -164,11 +165,6 @@ def run_block(sequence, stimuli, experiment_type, block_num, block_label,
             else:
                 time.sleep(max(0, pre_tone_silence - time_elapsed))
 
-            # ff.play falls back to SoftTrg(1) when zbus=False.
-            # time.sleep(tone_duration) replaces ff.wait_to_finish_playing(),
-            # which polls a 'playback' tag that shock.rcx may not expose —
-            # causing it to return immediately and shift sounds one tone forward.
-
 
         elif experiment_type == 'a':
             info = pattern_info[i]
@@ -176,6 +172,7 @@ def run_block(sequence, stimuli, experiment_type, block_num, block_label,
 
             # Play combined buffer (all tones + within-pattern gaps in one shot)
             ff.play(1, [procsser])
+            ff.wait_to_finish_playing()
             time.sleep(patterns[i].duration)
             stimulus_value = info['base_freq']
 
