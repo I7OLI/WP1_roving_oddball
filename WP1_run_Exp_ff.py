@@ -27,6 +27,17 @@ ff.initialize(
         zbus=False,
         connection='usb'
    )
+
+# ============================================================================
+# PRECISE TIMING
+# ============================================================================
+def precise_sleep_until(target_time, busy_wait_threshold=0.002):
+    remaining = target_time - time.time()
+    if remaining > busy_wait_threshold:
+        time.sleep(remaining - busy_wait_threshold)
+    while time.time() < target_time:
+        pass
+
 # ============================================================================
 # SOUND CREATION (from JSON trial data)
 # ============================================================================
@@ -88,8 +99,8 @@ def create_sounds(trials, experiment_type, tone_duration, iti_within_pattern=0.0
 # ============================================================================
 
 def run_block(sequence, stimuli, experiment_type, block_num, block_label,
-              participant_id, cs_plus_value, ITI, tone_duration, trial_log,
-              reinforcement=None, shock_onset=0.15, max_cumsum=4,
+              participant_id, cs_plus_value, ITI,SOA, tone_duration, trial_log,
+              reinforcement=None, shock_onset=0.25, max_cumsum=4,
               iti_within_pattern=0.05):
     """Play one block and log all trials."""
     print(f"\n{'=' * 70}")
@@ -141,79 +152,72 @@ def run_block(sequence, stimuli, experiment_type, block_num, block_label,
                   f"index={indices[i] - max_cumsum}"
                   f"{' | SHOCK' if shock_delivered else ''}")
 
-            # time1 = tone offset; time_elapsed updated if a write happens
-            time1 = time.time()
-            time_elapsed = 0
+            # Write always first — fits before shock at 250ms
             if i + 1 < len(tones):
-                ff.write('playbuflen', len(tones[i+1]), procsser)
-                ff.write('data_l', tones[i+1].left.data, procsser)
+                ff.write('playbuflen', len(tones[i + 1]), procsser)
+                ff.write('data_l', tones[i + 1].left.data, procsser)
                 ff.write('chan_l', 1, procsser)
-                ff.write('data_r', tones[i+1].right.data, procsser)
+                ff.write('data_r', tones[i + 1].right.data, procsser)
                 ff.write('chan_r', 2, procsser)
-                time_elapsed = time.time() - time1
-
-            # Pre-tone silence = SOA - tone_duration (ITI in JSON is the full SOA)
-            pre_tone_silence = ITI - tone_duration
+            # t ≈ 167ms
 
             if shock_delivered:
-                shock_wait = max(0, shock_onset - time_elapsed)
-                time.sleep(shock_wait)
-                ff.play(2,[procsser])
-                elapsed = time.time() - time1
-                remaining = max(0, pre_tone_silence - elapsed)
-                time.sleep(remaining)
-            else:
-                time.sleep(max(0, pre_tone_silence - time_elapsed))
+                time.sleep(max(0, t_onset + shock_onset - time.time()))  # sleep to 250ms
+                ff.play(2, [procsser])
 
+            precise_sleep_until(t_onset + SOA) # sleep to 300ms
 
         elif experiment_type == 'a':
 
+            A_SOA = 0.750
+            A_SHOCK = 0.55
+
             info = pattern_info[i]
+
             freqs_str = '-'.join([f"{f:.0f}" for f in info['frequencies']])
-
-            # Play combined buffer (all tones + within-pattern gaps in one shot)
-            ff.play(1, [procsser])
-            ff.wait_to_finish_playing()
-
             stimulus_value = info['base_freq']
+
+            t_onset = time.time()
+            ff.play(1, [procsser])
             print(f"Trial {i + 1:3d}/{len(sequence)}: {marker} {cs_label:>3s} | "
                   f"{info['pattern_name']:>8s} | base={info['base_freq']:.0f}Hz "
                   f"tones={freqs_str}{' | SHOCK' if shock_delivered else ''}")
+            ff.wait_to_finish_playing()
 
-            # ITI: write next pattern buffer, then shock
-            time1 = time.time()
-            time_elapsed = 0
             if i + 1 < len(patterns):
-                ff.write('playbuflen', len(patterns[i+1]), procsser)
-                ff.write('data_l', patterns[i+1].data, procsser)
+                ff.write('playbuflen', len(patterns[i + 1]), procsser)
+                ff.write('data_l', patterns[i + 1].data, procsser)
                 ff.write('chan_l', 1, procsser)
-                ff.write('data_r', patterns[i+1].data, procsser)
+                ff.write('data_r', patterns[i + 1].data, procsser)
                 ff.write('chan_r', 2, procsser)
-                time_elapsed = time.time() - time1
 
-            post_pattern_gap = ITI - tone_duration
+            # t ≈ 409ms
+
             if shock_delivered:
-                time.sleep(max(0, shock_onset - time_elapsed))
-                ff.play(2, [procsser])
-                elapsed = time.time() - time1
-                time.sleep(max(0, post_pattern_gap - elapsed))
-            else:
-                time.sleep(max(0, post_pattern_gap - time_elapsed))
+                precise_sleep_until(t_onset + A_SHOCK)  # 400ms — may already be past, that's ok
 
-        # --- Log trial ---
-        trial_log.append({
-            'participant_id': participant_id,
-            'block': block_num,
-            'block_label': block_label,
-            'trial_num': i + 1,
-            'experiment_type': experiment_type,
-            'sequence_value': sequence[i],
-            'trial_type': cs_label,
-            'stimulus_value': stimulus_value,
-            'is_cs_plus': sequence[i] == cs_plus_value,
-            'shock_delivered': shock_delivered,
-            'timestamp': t_onset
-        })
+                ff.play(2, [procsser])
+
+            print(f"  elapsed before sleep: {(time.time() - t_onset) * 1000:.1f}ms, targeting 600ms")
+            precise_sleep_until(t_onset + A_SOA)
+            print(f"  elapsed after sleep:  {(time.time() - t_onset) * 1000:.1f}ms")
+
+            # --- Log trial ---
+            trial_log.append({
+                'participant_id': participant_id,
+                'block': block_num,
+                'block_label': block_label,
+                'trial_num': i + 1,
+                'experiment_type': experiment_type,
+                'sequence_value': sequence[i],
+                'trial_type': cs_label,
+                'stimulus_value': stimulus_value,
+                'is_cs_plus': sequence[i] == cs_plus_value,
+                'shock_delivered': shock_delivered,
+                'timestamp': t_onset
+            })
+            time_end = time.time()
+            print(time_end - t_onset)
 
 
 # ============================================================================
@@ -250,7 +254,7 @@ if __name__ == '__main__':
     ITI = meta['ITI']
     tone_duration = meta['tone_duration']
     iti_within_pattern = meta.get('iti_within_pattern', 0.05)
-    shock_onset = meta.get('shock_onset_in_iti', 0.15)
+    shock_onset = meta.get('shock_onset_in_iti', 0.25)
     max_cumsum = meta.get('max_cumsum', 4)
 
     print(f"\n{'=' * 70}")
@@ -294,6 +298,7 @@ if __name__ == '__main__':
             participant_id=participant_id,
             cs_plus_value=cs_plus_value,
             ITI=ITI,
+            SOA=ITI+tone_duration,
             tone_duration=tone_duration,
             trial_log=trial_log,
             reinforcement=reinforcement,
