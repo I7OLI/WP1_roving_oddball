@@ -170,7 +170,7 @@ def run_block(sequence, stimuli, experiment_type, block_num, block_label,
         elif experiment_type == 'a':
 
             A_SOA = 0.750
-            A_SHOCK = 0.55
+            A_SHOCK = 0.4
 
             info = pattern_info[i]
 
@@ -184,6 +184,11 @@ def run_block(sequence, stimuli, experiment_type, block_num, block_label,
                   f"tones={freqs_str}{' | SHOCK' if shock_delivered else ''}")
             ff.wait_to_finish_playing()
 
+            if shock_delivered:
+                precise_sleep_until(t_onset + A_SHOCK)  # 400ms — may already be past, that's ok
+
+                ff.play(2, [procsser])
+
             if i + 1 < len(patterns):
                 ff.write('playbuflen', len(patterns[i + 1]), procsser)
                 ff.write('data_l', patterns[i + 1].data, procsser)
@@ -191,12 +196,6 @@ def run_block(sequence, stimuli, experiment_type, block_num, block_label,
                 ff.write('data_r', patterns[i + 1].data, procsser)
                 ff.write('chan_r', 2, procsser)
 
-            # t ≈ 409ms
-
-            if shock_delivered:
-                precise_sleep_until(t_onset + A_SHOCK)  # 400ms — may already be past, that's ok
-
-                ff.play(2, [procsser])
 
             print(f"  elapsed before sleep: {(time.time() - t_onset) * 1000:.1f}ms, targeting 600ms")
             precise_sleep_until(t_onset + A_SOA)
