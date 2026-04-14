@@ -75,7 +75,7 @@ def create_sounds(trials, experiment_type, tone_duration, iti_within_pattern=0.0
         silence_samples = int(iti_within_pattern * slab.get_default_samplerate())
         for t in trials:
             pattern_tones = [
-                slab.Sound.tone(frequency=f, duration=tone_duration).ramp('offset', 0.01)
+                slab.Sound.tone(frequency=f, duration=tone_duration/2).ramp('offset', 0.01)
                 for f in t['frequencies']
             ]
             # Concatenate tones with silence between them into one buffer.
@@ -100,8 +100,7 @@ def create_sounds(trials, experiment_type, tone_duration, iti_within_pattern=0.0
 
 def run_block(sequence, stimuli, experiment_type, block_num, block_label,
               participant_id, cs_plus_value, ITI,SOA, tone_duration, trial_log,
-              reinforcement=None, shock_onset=0.25, max_cumsum=4,
-              iti_within_pattern=0.05):
+              reinforcement=None, shock_onset=0.25, max_cumsum=4,A_SOA = 0.50,iti_within_pattern=0.05):
     """Play one block and log all trials."""
     print(f"\n{'=' * 70}")
     print(f"PLAYING BLOCK {block_num}: {block_label}")
@@ -128,7 +127,6 @@ def run_block(sequence, stimuli, experiment_type, block_num, block_label,
         ff.write('chan_r', 2, procsser)
 
     for i in range(len(sequence)):
-        t_onset = time.time()
 
         # --- CS label ---
         if sequence[i] == cs_plus_value:
@@ -140,6 +138,7 @@ def run_block(sequence, stimuli, experiment_type, block_num, block_label,
         marker = "DEV" if sequence[i] != 0 else "STD"
         shock_delivered = reinforcement is not None and reinforcement[i]
 
+        t_onset = time.time()
         # --- Print + play (type-specific) ---
         if experiment_type in ['f', 'p']:
 
@@ -162,15 +161,14 @@ def run_block(sequence, stimuli, experiment_type, block_num, block_label,
             # t ≈ 167ms
 
             if shock_delivered:
-                time.sleep(max(0, t_onset + shock_onset - time.time()))  # sleep to 250ms
+                precise_sleep_until(t_onset + shock_onset )# sleep to 250ms
                 ff.play(2, [procsser])
+                time_shock = time.time()
+                print(time_shock - t_onset)
 
             precise_sleep_until(t_onset + SOA) # sleep to 300ms
 
         elif experiment_type == 'a':
-
-            A_SOA = 0.750
-            A_SHOCK = 0.4
 
             info = pattern_info[i]
 
@@ -185,9 +183,11 @@ def run_block(sequence, stimuli, experiment_type, block_num, block_label,
             ff.wait_to_finish_playing()
 
             if shock_delivered:
-                precise_sleep_until(t_onset + A_SHOCK)  # 400ms — may already be past, that's ok
+                precise_sleep_until(t_onset + shock_onset + iti_within_pattern)
 
                 ff.play(2, [procsser])
+                time_shock = time.time()
+                print(time_shock - t_onset)
 
             if i + 1 < len(patterns):
                 ff.write('playbuflen', len(patterns[i + 1]), procsser)
@@ -196,10 +196,8 @@ def run_block(sequence, stimuli, experiment_type, block_num, block_label,
                 ff.write('data_r', patterns[i + 1].data, procsser)
                 ff.write('chan_r', 2, procsser)
 
-
-            print(f"  elapsed before sleep: {(time.time() - t_onset) * 1000:.1f}ms, targeting 600ms")
             precise_sleep_until(t_onset + A_SOA)
-            print(f"  elapsed after sleep:  {(time.time() - t_onset) * 1000:.1f}ms")
+
 
             # --- Log trial ---
             trial_log.append({
