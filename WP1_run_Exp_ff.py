@@ -327,3 +327,4 @@ if __name__ == '__main__':
 
     print(f"Data saved to {filename}")
     print(f"Total trials logged: {len(trial_log)}")
+    print(f"\n{'=' * 70}")
