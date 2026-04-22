@@ -10,7 +10,7 @@ Single mode:
 
 Output:
     WP1_sequences_n20/WP1_sub001_f_seq.json  (batch)
-    WP1_sub001_f_seq.json                     (single)
+    WP1_sub001_f_seq.json                     (single) bla
 """
 import argparse
 import json
