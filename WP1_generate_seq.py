@@ -61,6 +61,27 @@ def create_balanced_deviant_vector(n_trains, max_cumsum=4, max_attempts=1000):
     )
 
 
+def assign_lengths_evenly(train_lengths, n):
+    """
+    Return a shuffled list of n train-length values drawn from train_lengths
+    as evenly as possible, with any remainder distributed randomly.
+    """
+    n_lengths = len(train_lengths)
+    base = n // n_lengths
+    remainder = n % n_lengths
+
+    distribution = [base] * n_lengths
+    for idx in random.sample(range(n_lengths), remainder):
+        distribution[idx] += 1
+
+    result = []
+    for length, count in zip(train_lengths, distribution):
+        result.extend([[0] * length] * count)
+
+    random.shuffle(result)
+    return result
+
+
 def create_roving_sequence(train_lengths=[5, 6, 7, 8, 9, 10],
                            n_deviants=200, max_cumsum=4, soa=0.3,
                            block_size=50):
@@ -280,8 +301,9 @@ N_DEVIANTS_BASELINE = 400
 N_DEVIANTS_CONDITIONING = 600
 N_SHOCK = 150
 REINF_PROB_START = 0.7
-REINF_PROB_END = 0.4
+REINF_PROB_END = 0.3
 SHOCK_ONSET_IN_ITI = 0.15
+SOA = ITI + TONE_DURATION
 
 FREQUENCY_LIST = macke_feqlist(700, MAX_CUMSUM, 0.1)
 POSITION_LIST = macke_azilist(MAX_CUMSUM, 10)
@@ -304,59 +326,87 @@ BLOCK_CONFIGS = [
 # ============================================================================
 # GENERATE ONE PARTICIPANT x TYPE
 # ============================================================================
+def get_cs_plus_assignment(participant_id):
+    """
+    Returns the CS+ direction (+1 or -1) for all 3 experiment types
+    to ensure perfect counterbalancing every 8 participants.
+
+    Mappings:
+    f: +1 (High) / -1 (Low)
+    p: +1 (Right) / -1 (Left)
+    a: +1 (Up)    / -1 (Down)
+    """
+    # Full factorial 2x2x2 design (8 combinations)
+    combos = [
+        {'f': 1, 'p': 1, 'a': 1},    # 1: High, Right, Up
+        {'f': 1, 'p': 1, 'a': -1},   # 2: High, Right, Down
+        {'f': 1, 'p': -1, 'a': 1},   # 3: High, Left,  Up
+        {'f': 1, 'p': -1, 'a': -1},  # 4: High, Left,  Down
+        {'f': -1, 'p': 1, 'a': 1},   # 5: Low,  Right, Up
+        {'f': -1, 'p': 1, 'a': -1},  # 6: Low,  Right, Down
+        {'f': -1, 'p': -1, 'a': 1},  # 7: Low,  Left,  Up
+        {'f': -1, 'p': -1, 'a': -1}, # 8: Low,  Left,  Down
+    ]
+    # Use modulo 8 to cycle through combinations based on participant ID
+    return combos[(participant_id - 1) % 8]
+
 
 def generate_one(participant_id, experiment_type, seed, out_dir='.'):
-    """
-    Generate sequences for one participant + experiment type, save to JSON.
-    Returns a summary dict.
-    """
+    # Set seeds
     random.seed(seed)
     np.random.seed(seed)
 
-    # Counterbalancing: even ID => +1 is CS+, odd ID => -1 is CS+
-    cs_plus_value = 1 if participant_id % 2 == 0 else -1
+    # --- NEW COUNTERBALANCING LOGIC ---
+    assignment = get_cs_plus_assignment(participant_id)
+    cs_plus_value = assignment[experiment_type]
+
+    # Map the numeric value to a human-readable label for the summary
+    labels = {
+        'f': {1: "High", -1: "Low"},
+        'p': {1: "Right", -1: "Left"},
+        'a': {1: "Up", -1: "Down"}
+    }
+    cs_label = labels[experiment_type][cs_plus_value]
     cs_minus_value = -cs_plus_value
 
-    print(f"\n{'=' * 70}")
-    print(f"Sub {participant_id:03d} | type={experiment_type} | CS+={cs_plus_value:+d} | seed={seed}")
-    print(f"{'=' * 70}")
-
     # --- Generate blocks ---
-    blocks = []
-    for block_cfg in BLOCK_CONFIGS:
-        print(f"  Block {block_cfg['block_num']}: {block_cfg['label']}")
+    value_list = {'f': FREQUENCY_LIST, 'p': POSITION_LIST}.get(experiment_type, None)
 
-        seq, dev = create_roving_sequence(
-            train_lengths=[5, 6, 7, 8, 9, 10],
-            n_deviants=block_cfg['n_deviants'],
+    blocks = []
+    for cfg in BLOCK_CONFIGS:
+        print(f"\n--- Block {cfg['block_num']}: {cfg['label']} ---")
+
+        sequence, deviants = create_roving_sequence(
+            n_deviants=cfg['n_deviants'],
             max_cumsum=MAX_CUMSUM,
-            soa=SOA,
-            block_size=50
+            soa=SOA
         )
 
-        # Resolve per-trial stimulus values
-        if experiment_type in ['f', 'p']:
-            value_list = FREQUENCY_LIST if experiment_type == 'f' else POSITION_LIST
-            trials = resolve_values_list_based(value_list, seq)
-        elif experiment_type == 'a':
-            trials = resolve_values_pattern(
-                FREQUENCY_LIST, PATTERN_STRUCTURES, seq, step=0.1
-            )
+        # Resolve per-trial stimulus values based on experiment type
+        if experiment_type in ('f', 'p'):
+            trials = resolve_values_list_based(value_list, sequence)
+        else:  # 'a'
+            trials = resolve_values_pattern(FREQUENCY_LIST, PATTERN_STRUCTURES, sequence)
 
-        # Reinforcement schedule (conditioning blocks only)
-        reinforcement = None
-        if block_cfg['use_reinforcement']:
+        # Reinforcement schedule (conditioning block only)
+        if cfg['use_reinforcement']:
             reinforcement, reinf_info = generate_reinforcement_schedule(
-                seq, cs_plus_value, n_shock=N_SHOCK,
-                prob_start=REINF_PROB_START, prob_end=REINF_PROB_END
+                sequence, cs_plus_value,
+                n_shock=N_SHOCK,
+                prob_start=REINF_PROB_START,
+                prob_end=REINF_PROB_END
             )
+        else:
+            reinforcement = None
+            reinf_info = None
 
         blocks.append({
-            'block_num': block_cfg['block_num'],
-            'label': block_cfg['label'],
-            'sequence': seq,
+            'block_num': cfg['block_num'],
+            'label': cfg['label'],
+            'sequence': sequence,
+            'trials': trials,
             'reinforcement': reinforcement,
-            'trials': trials
+            'reinforcement_info': reinf_info,
         })
 
     # --- Build output ---
@@ -365,7 +415,7 @@ def generate_one(participant_id, experiment_type, seed, out_dir='.'):
             'participant_id': participant_id,
             'experiment_type': experiment_type,
             'cs_plus_value': cs_plus_value,
-            'cs_minus_value': cs_minus_value,
+            'cs_minus_value': -cs_plus_value,
             'ITI': ITI,
             'tone_duration': TONE_DURATION,
             'iti_within_pattern': ITI_WITHIN_PATTERN,

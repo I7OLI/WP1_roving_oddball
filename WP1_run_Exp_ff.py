@@ -127,6 +127,7 @@ def run_block(sequence, stimuli, experiment_type, block_num, block_label,
         ff.write('chan_r', 2, procsser)
 
     for i in range(len(sequence)):
+        t_onset = time.time()
 
         # --- CS label ---
         if sequence[i] == cs_plus_value:
@@ -195,6 +196,7 @@ def run_block(sequence, stimuli, experiment_type, block_num, block_label,
                 ff.write('chan_l', 1, procsser)
                 ff.write('data_r', patterns[i + 1].data, procsser)
                 ff.write('chan_r', 2, procsser)
+
 
             precise_sleep_until(t_onset + A_SOA)
 
@@ -327,4 +329,3 @@ if __name__ == '__main__':
 
     print(f"Data saved to {filename}")
     print(f"Total trials logged: {len(trial_log)}")
-    print(f"\n{'=' * 70}")

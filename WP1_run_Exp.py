@@ -9,19 +9,41 @@ import os
 import json
 import time
 import csv
+import numpy as np
 import slab
 
+
+# ============================================================================
+# FREEFIELD CONFIGURATION
+# ============================================================================
+fs = 48828.125
+slab.set_default_samplerate(fs)
+rcx_file = 'shock.rcx'
+procsser = 'RM1'
+
+
+# ============================================================================
+# PRECISE TIMING
+# ============================================================================
+def precise_sleep_until(target_time, busy_wait_threshold=0.002):
+    remaining = target_time - time.time()
+    if remaining > busy_wait_threshold:
+        time.sleep(remaining - busy_wait_threshold)
+    while time.time() < target_time:
+        pass
 
 # ============================================================================
 # SOUND CREATION (from JSON trial data)
 # ============================================================================
 
-def create_sounds(trials, experiment_type, tone_duration):
+def create_sounds(trials, experiment_type, tone_duration, iti_within_pattern=0.05):
     """
     Create slab.Sound objects from pre-resolved JSON trial data.
 
     For f/p:  returns (tones, values, indices)
-    For a:    returns (patterns_to_play, pattern_info)
+    For a:    returns (patterns, pattern_info)
+              Each pattern is a single combined slab.Sound:
+              [tone1 | silence | tone2 | ...] loaded as one buffer.
     """
     if experiment_type in ['f', 'p']:
         tones = []
@@ -30,27 +52,40 @@ def create_sounds(trials, experiment_type, tone_duration):
         for t in trials:
             if experiment_type == 'f':
                 tone = slab.Sound.tone(frequency=t['value'], duration=tone_duration)
-                tone = tone.ramp('offset', 0.02)
+                tone = slab.Binaural(tone)
+                tone = tone.ramp('offset', 0.005)
             else:  # 'p'
                 tone = slab.Sound.tone(frequency=700, duration=tone_duration, n_channels=2)
                 tone = slab.Binaural(tone).at_azimuth(t['value'])
-                tone = tone.ramp('offset', 0.02)
+                tone = tone.ramp('offset', 0.005)
             tones.append(tone)
             values.append(t['value'])
             indices.append(t['index'])
         return tones, values, indices
 
     elif experiment_type == 'a':
-        patterns_to_play = []
+        patterns = []
         pattern_info = []
+        silence_samples = int(iti_within_pattern * slab.get_default_samplerate())
         for t in trials:
             pattern_tones = [
-                slab.Sound.tone(frequency=f, duration=tone_duration).ramp('offset', 0.01)
+                slab.Sound.tone(frequency=f, duration=tone_duration).ramp('offset', 0.005)
                 for f in t['frequencies']
             ]
-            patterns_to_play.append((pattern_tones, t['pattern_name'], t['base_freq']))
+            # Concatenate tones with silence between them into one buffer.
+            # Single write + single SoftTrg means within-pattern timing is
+            # hardware-precise rather than controlled by Python sleeps.
+            n_ch = pattern_tones[0].data.shape[1]
+            parts = []
+            for idx, tone in enumerate(pattern_tones):
+                parts.append(tone.data)
+                if idx < len(pattern_tones) - 1:
+                    parts.append(np.zeros((silence_samples, n_ch)))
+            combined = slab.Sound(np.vstack(parts),
+                                  samplerate=slab.get_default_samplerate())
+            patterns.append(combined)
             pattern_info.append(t)
-        return patterns_to_play, pattern_info
+        return patterns, pattern_info
 
 
 # ============================================================================
@@ -58,9 +93,8 @@ def create_sounds(trials, experiment_type, tone_duration):
 # ============================================================================
 
 def run_block(sequence, stimuli, experiment_type, block_num, block_label,
-              participant_id, cs_plus_value, ITI, trial_log,
-              reinforcement=None, shock_onset=0.15, max_cumsum=4,
-              iti_within_pattern=0.05):
+              participant_id, cs_plus_value,SOA, trial_log,
+              reinforcement=None, shock_onset=0.25, max_cumsum=4):
     """Play one block and log all trials."""
     print(f"\n{'=' * 70}")
     print(f"PLAYING BLOCK {block_num}: {block_label}")
@@ -68,13 +102,15 @@ def run_block(sequence, stimuli, experiment_type, block_num, block_label,
 
     cs_minus_value = -cs_plus_value
 
-    # Unpack stimuli
+    # Unpack stimuli and pre-load first buffer
     if experiment_type in ['f', 'p']:
         tones, values, indices = stimuli
         value_label = "freq" if experiment_type == 'f' else "azimuth"
         value_unit = "Hz" if experiment_type == 'f' else "deg"
+
     elif experiment_type == 'a':
-        patterns_to_play, pattern_info = stimuli
+        patterns, pattern_info = stimuli
+
 
     for i in range(len(sequence)):
         t_onset = time.time()
@@ -91,47 +127,67 @@ def run_block(sequence, stimuli, experiment_type, block_num, block_label,
 
         # --- Print + play (type-specific) ---
         if experiment_type in ['f', 'p']:
+
+            stimulus_value = values[i]
+            tones.play()
             print(f"Tone {i + 1:3d}/{len(sequence)}: {marker} {cs_label:>3s} | "
                   f"{value_label}={values[i]:7.1f} {value_unit} | "
                   f"index={indices[i] - max_cumsum}"
                   f"{' | SHOCK' if shock_delivered else ''}")
-            tones[i].play()
-            stimulus_value = values[i]
+
+            # Write always first — fits before shock at 250ms
+
+
+            if shock_delivered:
+                time.sleep(max(0, t_onset + shock_onset - time.time()))  # sleep to 250ms
+                print('SHOCK')
+
+            precise_sleep_until(t_onset + SOA) # sleep to 300ms
 
         elif experiment_type == 'a':
-            pattern_tones, pattern_name, base_freq = patterns_to_play[i]
-            freqs_str = '-'.join([f"{f:.0f}" for f in pattern_info[i]['frequencies']])
+
+            A_SOA = 0.750
+            A_SHOCK = 0.55
+
+            info = pattern_info[i]
+
+            freqs_str = '-'.join([f"{f:.0f}" for f in info['frequencies']])
+            stimulus_value = info['base_freq']
+
+            t_onset = time.time()
+            patterns.play()
             print(f"Trial {i + 1:3d}/{len(sequence)}: {marker} {cs_label:>3s} | "
-                  f"{pattern_name:>8s} | base={base_freq:.0f}Hz tones={freqs_str}"
-                  f"{' | SHOCK' if shock_delivered else ''}")
-            for tone_idx, tone in enumerate(pattern_tones):
-                tone.play()
-                if tone_idx < len(pattern_tones) - 1:
-                    time.sleep(iti_within_pattern)
-            stimulus_value = base_freq
+                  f"{info['pattern_name']:>8s} | base={info['base_freq']:.0f}Hz "
+                  f"tones={freqs_str}{' | SHOCK' if shock_delivered else ''}")
 
-        # --- Shock during ITI ---
-        if shock_delivered:
-            time.sleep(shock_onset)
-            print("  >>> SHOCK <<<")
-            time.sleep(ITI - shock_onset)
-        else:
-            time.sleep(ITI)
 
-        # --- Log trial ---
-        trial_log.append({
-            'participant_id': participant_id,
-            'block': block_num,
-            'block_label': block_label,
-            'trial_num': i + 1,
-            'experiment_type': experiment_type,
-            'sequence_value': sequence[i],
-            'trial_type': cs_label,
-            'stimulus_value': stimulus_value,
-            'is_cs_plus': sequence[i] == cs_plus_value,
-            'shock_delivered': shock_delivered,
-            'timestamp': t_onset
-        })
+
+
+            if shock_delivered:
+                precise_sleep_until(t_onset + A_SHOCK)  # 400ms — may already be past, that's ok
+
+                print('SHOCK')
+
+            print(f"  elapsed before sleep: {(time.time() - t_onset) * 1000:.1f}ms, targeting 600ms")
+            precise_sleep_until(t_onset + A_SOA)
+            print(f"  elapsed after sleep:  {(time.time() - t_onset) * 1000:.1f}ms")
+
+            # --- Log trial ---
+            trial_log.append({
+                'participant_id': participant_id,
+                'block': block_num,
+                'block_label': block_label,
+                'trial_num': i + 1,
+                'experiment_type': experiment_type,
+                'sequence_value': sequence[i],
+                'trial_type': cs_label,
+                'stimulus_value': stimulus_value,
+                'is_cs_plus': sequence[i] == cs_plus_value,
+                'shock_delivered': shock_delivered,
+                'timestamp': t_onset
+            })
+            time_end = time.time()
+            print(time_end - t_onset)
 
 
 # ============================================================================
@@ -160,6 +216,7 @@ if __name__ == '__main__':
     with open(seq_file) as f:
         data = json.load(f)
 
+
     meta = data['metadata']
     participant_id = meta['participant_id']
     experiment_type = meta['experiment_type']
@@ -167,7 +224,7 @@ if __name__ == '__main__':
     ITI = meta['ITI']
     tone_duration = meta['tone_duration']
     iti_within_pattern = meta.get('iti_within_pattern', 0.05)
-    shock_onset = meta.get('shock_onset_in_iti', 0.15)
+    shock_onset = meta.get('shock_onset_in_iti', 0.25)
     max_cumsum = meta.get('max_cumsum', 4)
 
     print(f"\n{'=' * 70}")
@@ -196,7 +253,8 @@ if __name__ == '__main__':
         print(f"    {len(seq)} trials, {n_devs} deviants")
 
         # Create slab.Sound objects from pre-resolved trial data
-        stimuli = create_sounds(block_data['trials'], experiment_type, tone_duration)
+        stimuli = create_sounds(block_data['trials'], experiment_type,
+                                tone_duration, iti_within_pattern)
 
         print(f"\nPress Enter to start BLOCK {block_num} ({label})...")
         input()
@@ -210,6 +268,8 @@ if __name__ == '__main__':
             participant_id=participant_id,
             cs_plus_value=cs_plus_value,
             ITI=ITI,
+            SOA=ITI+tone_duration,
+            tone_duration=tone_duration,
             trial_log=trial_log,
             reinforcement=reinforcement,
             shock_onset=shock_onset,
