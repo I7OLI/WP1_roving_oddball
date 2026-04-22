@@ -250,7 +250,7 @@ def resolve_values_list_based(value_list, seq):
     return trials
 
 
-def resolve_values_pattern(base_freq_list, pattern_structures, seq, step=0.1):
+def resolve_values_pattern(base_freq_list, pattern_structures, seq, step=0.15):
     """Pick random base_freq per trial, compute frequencies."""
     step_mult = 1 + step
     pattern_names = {0: "standard", 1: "up", -1: "down"}
@@ -297,12 +297,12 @@ ITI = 0.2
 TONE_DURATION = 0.1
 ITI_WITHIN_PATTERN = 0.05
 MAX_CUMSUM = 4
-N_DEVIANTS_BASELINE = 400
+N_DEVIANTS_BASELINE = 20
 N_DEVIANTS_CONDITIONING = 600
 N_SHOCK = 150
 REINF_PROB_START = 0.7
 REINF_PROB_END = 0.3
-SHOCK_ONSET_IN_ITI = 0.15
+SHOCK_ONSET_IN_ITI = 0.1
 SOA = ITI + TONE_DURATION
 
 FREQUENCY_LIST = macke_feqlist(700, MAX_CUMSUM, 0.1)
@@ -313,7 +313,6 @@ PATTERN_STRUCTURES = {
     -1: [0, -1]     # deviant down: stay-down
 }
 
-SOA = ITI + TONE_DURATION
 
 BLOCK_CONFIGS = [
     {'block_num': 1, 'label': 'BASELINE',

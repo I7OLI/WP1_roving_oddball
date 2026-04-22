@@ -59,11 +59,11 @@ def create_sounds(trials, experiment_type, tone_duration, iti_within_pattern=0.0
             if experiment_type == 'f':
                 tone = slab.Sound.tone(frequency=t['value'], duration=tone_duration)
                 tone = slab.Binaural(tone)
-                tone = tone.ramp('offset', 0.02)
+                tone = tone.ramp('offset', 0.05)
             else:  # 'p'
                 tone = slab.Sound.tone(frequency=700, duration=tone_duration, n_channels=2)
                 tone = slab.Binaural(tone).at_azimuth(t['value'])
-                tone = tone.ramp('offset', 0.02)
+                tone = tone.ramp('offset', 0.05)
             tones.append(tone)
             values.append(t['value'])
             indices.append(t['index'])
@@ -75,7 +75,7 @@ def create_sounds(trials, experiment_type, tone_duration, iti_within_pattern=0.0
         silence_samples = int(iti_within_pattern * slab.get_default_samplerate())
         for t in trials:
             pattern_tones = [
-                slab.Sound.tone(frequency=f, duration=tone_duration/2).ramp('offset', 0.01)
+                slab.Sound.tone(frequency=f, duration=tone_duration/2).ramp('offset', 0.05)
                 for f in t['frequencies']
             ]
             # Concatenate tones with silence between them into one buffer.
@@ -100,7 +100,7 @@ def create_sounds(trials, experiment_type, tone_duration, iti_within_pattern=0.0
 
 def run_block(sequence, stimuli, experiment_type, block_num, block_label,
               participant_id, cs_plus_value, ITI,SOA, tone_duration, trial_log,
-              reinforcement=None, shock_onset=0.25, max_cumsum=4,A_SOA = 0.50,iti_within_pattern=0.05):
+              reinforcement=None, shock_onset=0.25, max_cumsum=4,A_SOA = 0.50,iti_within_pattern=0.1):
     """Play one block and log all trials."""
     print(f"\n{'=' * 70}")
     print(f"PLAYING BLOCK {block_num}: {block_label}")
@@ -127,7 +127,6 @@ def run_block(sequence, stimuli, experiment_type, block_num, block_label,
         ff.write('chan_r', 2, procsser)
 
     for i in range(len(sequence)):
-        t_onset = time.time()
 
         # --- CS label ---
         if sequence[i] == cs_plus_value:
@@ -139,7 +138,6 @@ def run_block(sequence, stimuli, experiment_type, block_num, block_label,
         marker = "DEV" if sequence[i] != 0 else "STD"
         shock_delivered = reinforcement is not None and reinforcement[i]
 
-        t_onset = time.time()
         # --- Print + play (type-specific) ---
         if experiment_type in ['f', 'p']:
 
@@ -165,7 +163,7 @@ def run_block(sequence, stimuli, experiment_type, block_num, block_label,
                 precise_sleep_until(t_onset + shock_onset )# sleep to 250ms
                 ff.play(2, [procsser])
                 time_shock = time.time()
-                print(time_shock - t_onset)
+
 
             precise_sleep_until(t_onset + SOA) # sleep to 300ms
 
@@ -188,7 +186,6 @@ def run_block(sequence, stimuli, experiment_type, block_num, block_label,
 
                 ff.play(2, [procsser])
                 time_shock = time.time()
-                print(time_shock - t_onset)
 
             if i + 1 < len(patterns):
                 ff.write('playbuflen', len(patterns[i + 1]), procsser)
@@ -215,8 +212,7 @@ def run_block(sequence, stimuli, experiment_type, block_num, block_label,
                 'shock_delivered': shock_delivered,
                 'timestamp': t_onset
             })
-            time_end = time.time()
-            print(time_end - t_onset)
+
 
 
 # ============================================================================
