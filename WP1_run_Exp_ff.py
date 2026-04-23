@@ -95,7 +95,7 @@ def create_sounds(trials, experiment_type, tone_duration, iti_within_pattern=0.0
 
 
 # ============================================================================
-# BLOCK RUNNER b
+# BLOCK RUNNER
 # ============================================================================
 
 def run_block(sequence, stimuli, experiment_type, block_num, block_label,
