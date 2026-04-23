@@ -100,7 +100,7 @@ def create_sounds(trials, experiment_type, tone_duration, iti_within_pattern=0.0
 
 def run_block(sequence, stimuli, experiment_type, block_num, block_label,
               participant_id, cs_plus_value, ITI,SOA, tone_duration, trial_log,
-              reinforcement=None, shock_onset=0.25, max_cumsum=4,A_SOA = 0.50,iti_within_pattern=0.1):
+              reinforcement=None, shock_onset=0.25, max_cumsum=4,A_SOA = 0.65,iti_within_pattern=0.1):
     """Play one block and log all trials."""
     print(f"\n{'=' * 70}")
     print(f"PLAYING BLOCK {block_num}: {block_label}")
