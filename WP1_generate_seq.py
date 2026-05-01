@@ -24,7 +24,7 @@ from datetime import datetime
 # SEQUENCE GENERATION
 # ============================================================================
 
-def macke_feqlist(base=700, max_cumsum=4, step=0.1):
+def macke_feqlist(base=900, max_cumsum=4, step=0.1):
     step = 1 + step
     feqlist = [base / (step ** i) for i in range(1, max_cumsum + 1)]
     feqlist.append(base)
@@ -295,11 +295,11 @@ def sanitize_for_json(obj):
 
 ITI = 0.2
 TONE_DURATION = 0.1
-ITI_WITHIN_PATTERN = 0.05
+ITI_WITHIN_PATTERN = 0.1
 MAX_CUMSUM = 4
 N_DEVIANTS_BASELINE = 2
-N_DEVIANTS_CONDITIONING = 600
-N_SHOCK = 150
+N_DEVIANTS_CONDITIONING = 60
+N_SHOCK = 15
 REINF_PROB_START = 0.7
 REINF_PROB_END = 0.3
 SHOCK_ONSET_IN_ITI = 0.1
