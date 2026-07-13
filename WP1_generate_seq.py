@@ -192,11 +192,13 @@ def generate_reinforcement_schedule(sequence, cs_plus_value, n_shock=100,
                                     cs_minus_shocks=1, cs_plus_shocks=5):
     """
     Returns num_shock per trial:
-    - CS- trials: cs_minus_shocks (1) — tap control
     - CS+ shocked trials: cs_plus_shocks (5) — cascade
     - CS+ clean trials: 0
+    - CS- shocked trials: cs_minus_shocks (1) — tap control
+    - CS- clean trials: 0
 
-    Uses deterministic weighted selection for which CS+ trials get shocked.
+    Uses deterministic weighted selection (early bias) for both CS+ and CS-.
+    Same number of shocked trials for CS+ and CS- (balanced).
     """
     cs_plus_indices = [i for i, s in enumerate(sequence) if s == cs_plus_value]
     cs_minus_indices = [i for i, s in enumerate(sequence) if s == -cs_plus_value]
@@ -209,44 +211,53 @@ def generate_reinforcement_schedule(sequence, cs_plus_value, n_shock=100,
     if n_cs_plus == 0:
         return num_shock, {'n_cs_plus': 0, 'n_reinforced': 0, 'n_clean_cs_plus': 0}
 
-    n_shock = min(n_shock, n_cs_plus)
+    n_shock = min(n_shock, n_cs_plus, n_cs_minus)
 
-    # Linear decay weights: early CS+ trials get higher weight
-    weights = np.array([
-        prob_start - (prob_start - prob_end) * (r / max(n_cs_plus - 1, 1))
-        for r in range(n_cs_plus)
-    ])
-    weights /= weights.sum()
+    # Helper: linear decay weighted selection
+    def select_shocked_indices(indices, n_select):
+        n_total = len(indices)
+        if n_total == 0 or n_select == 0:
+            return set()
+        weights = np.array([
+            prob_start - (prob_start - prob_end) * (r / max(n_total - 1, 1))
+            for r in range(n_total)
+        ])
+        weights /= weights.sum()
+        return set(np.random.choice(n_total, size=n_select, replace=False, p=weights))
 
-    # Select exactly n_shock CS+ trials (weighted toward early ones)
-    shocked_ranks = set(np.random.choice(n_cs_plus, size=n_shock, replace=False, p=weights))
-
+    # Select CS+ shocked trials (weighted toward early)
+    cs_plus_shocked_ranks = select_shocked_indices(cs_plus_indices, n_shock)
     for rank, trial_idx in enumerate(cs_plus_indices):
-        if rank in shocked_ranks:
+        if rank in cs_plus_shocked_ranks:
             num_shock[trial_idx] = cs_plus_shocks  # cascade
-        else:
-            num_shock[trial_idx] = 0  # clean CS+
 
-    # CS- trials get 1 shock (tap control)
-    for trial_idx in cs_minus_indices:
-        num_shock[trial_idx] = cs_minus_shocks
+    # Select CS- shocked trials (same number, weighted toward early)
+    cs_minus_shocked_ranks = select_shocked_indices(cs_minus_indices, n_shock)
+    for rank, trial_idx in enumerate(cs_minus_indices):
+        if rank in cs_minus_shocked_ranks:
+            num_shock[trial_idx] = cs_minus_shocks  # tap
 
-    n_clean = n_cs_plus - n_shock
+    n_clean_cs_plus = n_cs_plus - n_shock
+    n_clean_cs_minus = n_cs_minus - n_shock
 
     print(f"\n{'=' * 70}")
-    print(f"REINFORCEMENT SCHEDULE (tap control)")
+    print(f"REINFORCEMENT SCHEDULE (balanced tap control)")
     print(f"{'=' * 70}")
     print(f"CS+ value:           {cs_plus_value:+d}")
     print(f"Total CS+ trials:    {n_cs_plus}")
     print(f"CS+ cascade (×{cs_plus_shocks}): {n_shock}")
-    print(f"CS+ clean (0):       {n_clean}")
-    print(f"CS- tap (×{cs_minus_shocks}):   {n_cs_minus}")
+    print(f"CS+ clean (0):       {n_clean_cs_plus}")
+    print(f"CS- total:           {n_cs_minus}")
+    print(f"CS- tap (×{cs_minus_shocks}):     {n_shock}")
+    print(f"CS- clean (0):       {n_clean_cs_minus}")
     print(f"{'=' * 70}\n")
 
     schedule_info = {
         'n_cs_plus': n_cs_plus,
+        'n_cs_minus': n_cs_minus,
         'n_reinforced': n_shock,
-        'n_clean_cs_plus': n_clean,
+        'n_clean_cs_plus': n_clean_cs_plus,
+        'n_clean_cs_minus': n_clean_cs_minus,
         'cs_minus_shocks': cs_minus_shocks,
         'cs_plus_shocks': cs_plus_shocks,
     }
