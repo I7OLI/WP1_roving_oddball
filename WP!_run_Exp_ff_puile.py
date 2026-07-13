@@ -1,20 +1,18 @@
 """
 Run WP1 experiment from a pre-generated JSON sequence file,
-with Pupil Labs eye-tracker recording and precise trial annotations.
+with Pupil Labs eye-tracker recording and trial annotations.
 
 Usage:
-    1. Open Pupil Capture manually, adjust cameras, calibrate.
-    2. python WP1_run_Exp_ff_pupil.py WP1_sub001_f_seq.json
+    python WP1_run_Exp_ff_pupil.py WP1_sub001_f_seq.json
 """
 import sys
 import os
 import json
 import time
 import csv
+import subprocess
 import numpy as np
 import slab
-from slab.experiments.room_voice_interference import condition
-
 import freefield as ff
 import zmq
 import msgpack as serializer
@@ -38,12 +36,26 @@ ff.initialize(
 # PUPIL LABS SETUP
 # ============================================================================
 
+def start_pupil_capture():
+    """Launch Pupil Capture as a subprocess."""
+    command = [
+        "python",
+        r"C:\Users\neurobio\Projects\WP1_roving_oddball\pupil\pupil_src\main.py",
+        "capture"
+    ]
+    proc = subprocess.Popen(command)
+    print("Waiting for Pupil Capture to start...")
+    time.sleep(6)  # give it time to fully open
+    return proc
+
+
 def connect_to_pupil():
     """Connect to Pupil Remote and return (pupil_remote, pub_socket)."""
     ctx = zmq.Context()
     pupil_remote = zmq.Socket(ctx, zmq.REQ)
     pupil_remote.connect('tcp://127.0.0.1:50020')
 
+    # Get the PUB port for sending annotations
     pupil_remote.send_string("PUB_PORT")
     pub_port = pupil_remote.recv_string()
     pub_socket = zmq.Socket(ctx, zmq.PUB)
@@ -52,26 +64,6 @@ def connect_to_pupil():
 
     print(f"Connected to Pupil Capture (PUB port: {pub_port})")
     return pupil_remote, pub_socket
-
-
-def measure_clock_offset(pupil_remote, n_samples=20):
-    """
-    Measure offset between local time.time() and Pupil's clock once at startup.
-    Uses the midpoint of the round-trip to estimate when Pupil sampled its clock.
-    Returns offset such that:  pupil_time = local_time + offset
-    """
-    offsets = []
-    for _ in range(n_samples):
-        local_before = time.time()
-        pupil_remote.send_string("t")
-        pupil_time = float(pupil_remote.recv_string())
-        local_after = time.time()
-        local_mid = (local_before + local_after) / 2
-        offsets.append(pupil_time - local_mid)
-    offset = float(np.median(offsets))
-    jitter_ms = float(np.std(offsets) * 1000)
-    print(f"Clock offset: {offset:.6f}s  (measurement jitter: ±{jitter_ms:.3f}ms)")
-    return offset
 
 
 def pupil_notify(pupil_remote, notification):
@@ -83,20 +75,22 @@ def pupil_notify(pupil_remote, notification):
     return pupil_remote.recv_string()
 
 
-def send_annotation(pub_socket, label, clock_offset,
-                    local_timestamp=None, duration=0.0, extra=None):
+def get_pupil_time(pupil_remote):
+    """Get current Pupil Capture timestamp (float, in seconds)."""
+    pupil_remote.send_string("t")
+    return float(pupil_remote.recv_string())
+
+
+def send_annotation(pub_socket, label, pupil_remote, duration=0.0, extra=None):
     """
-    Send an annotation to Pupil Capture.
-    local_timestamp is converted to Pupil time using the pre-measured clock
-    offset — no network round-trip, sub-millisecond precision.
+    Send a timestamped annotation to Pupil Capture.
+    extra: optional dict of additional key-value pairs added to the annotation.
     """
-    if local_timestamp is None:
-        local_timestamp = time.time()
-    pupil_timestamp = local_timestamp + clock_offset
+    timestamp = get_pupil_time(pupil_remote)
     annotation = {
         "topic": "annotation",
         "label": label,
-        "timestamp": pupil_timestamp,
+        "timestamp": timestamp,
         "duration": duration,
     }
     if extra:
@@ -104,37 +98,26 @@ def send_annotation(pub_socket, label, clock_offset,
     payload = serializer.dumps(annotation, use_bin_type=True)
     pub_socket.send_string(annotation["topic"], flags=zmq.SNDMORE)
     pub_socket.send(payload)
+    return timestamp
 
 
-def start_pupil_recording(pupil_remote, pub_socket, clock_offset, recording_dir):
-    """Enable plugins, set save path, and start recording."""
-    os.makedirs(recording_dir, exist_ok=True)
-
-    # Enable annotation plugin
+def start_pupil_recording(pupil_remote, pub_socket):
+    """Enable annotation plugin and start recording."""
     pupil_notify(pupil_remote, {
         "subject": "start_plugin",
         "name": "Annotation_Capture",
         "args": {}
     })
-    # Enable recorder and point it at our folder
-    pupil_notify(pupil_remote, {
-        "subject": "start_plugin",
-        "name": "Recorder",
-        "args": {"rec_root_dir": recording_dir}
-    })
-    time.sleep(0.5)  # give plugins time to load
-
     pupil_remote.send_string('R')
     response = pupil_remote.recv_string()
     print(f"Pupil recording started: {response}")
-    print(f"Saving eye data to:      {recording_dir}")
-    send_annotation(pub_socket, "experiment_start", clock_offset)
+    send_annotation(pub_socket, "experiment_start", pupil_remote)
 
 
-def stop_pupil_recording(pupil_remote, pub_socket, clock_offset):
+def stop_pupil_recording(pupil_remote, pub_socket):
     """Send end annotation and stop recording."""
-    send_annotation(pub_socket, "experiment_end", clock_offset)
-    time.sleep(0.5)  # ensure last annotation is written before stopping
+    send_annotation(pub_socket, "experiment_end", pupil_remote)
+    time.sleep(0.5)  # make sure last annotation is written before stopping
     pupil_remote.send_string('r')
     response = pupil_remote.recv_string()
     print(f"Pupil recording stopped: {response}")
@@ -153,10 +136,16 @@ def precise_sleep_until(target_time, busy_wait_threshold=0.002):
 
 
 # ============================================================================
-# SOUND CREATION
+# SOUND CREATION (from JSON trial data)
 # ============================================================================
 
 def create_sounds(trials, experiment_type, tone_duration, iti_within_pattern=0.05):
+    """
+    Create slab.Sound objects from pre-resolved JSON trial data.
+
+    For f/p:  returns (tones, values, indices)
+    For a:    returns (patterns, pattern_info)
+    """
     if experiment_type in ['f', 'p']:
         tones, values, indices = [], [], []
         for t in trials:
@@ -198,15 +187,15 @@ def create_sounds(trials, experiment_type, tone_duration, iti_within_pattern=0.0
 
 def run_block(sequence, stimuli, experiment_type, block_num, block_label,
               participant_id, cs_plus_value, ITI, SOA, tone_duration, trial_log,
-              pub_socket, clock_offset,
+              pupil_remote, pub_socket,
               reinforcement=None, shock_onset=0.25, max_cumsum=4,
               A_SOA=0.65, iti_within_pattern=0.1):
-    """Play one block, send precisely-timed Pupil annotations, log all trials."""
+    """Play one block, send Pupil annotations, and log all trials."""
     print(f"\n{'=' * 70}")
     print(f"PLAYING BLOCK {block_num}: {block_label}")
     print(f"{'=' * 70}\n")
 
-    send_annotation(pub_socket, f"block_{block_num}_start", clock_offset,
+    send_annotation(pub_socket, f"block_{block_num}_start", pupil_remote,
                     extra={"block_label": block_label})
 
     cs_minus_value = -cs_plus_value
@@ -230,6 +219,7 @@ def run_block(sequence, stimuli, experiment_type, block_num, block_label,
 
     for i in range(len(sequence)):
 
+        # --- CS label ---
         if sequence[i] == cs_plus_value:
             cs_label = "CS+"
         elif sequence[i] == cs_minus_value:
@@ -239,22 +229,20 @@ def run_block(sequence, stimuli, experiment_type, block_num, block_label,
         marker = "DEV" if sequence[i] != 0 else "STD"
         shock_delivered = reinforcement is not None and reinforcement[i]
 
+        # --- Play + annotate ---
         if experiment_type in ['f', 'p']:
-
-            # Capture timestamp immediately before hardware trigger
             t_onset = time.time()
             ff.play(1, [procsser])
 
-            # Annotation uses t_onset directly — zero network delay
-            send_annotation(pub_socket, f"trial_{marker}_{cs_label}", clock_offset,
-                            local_timestamp=t_onset,
+            # Send trial annotation immediately after triggering sound
+            send_annotation(pub_socket, f"trial_{marker}_{cs_label}", pupil_remote,
                             extra={
-                                "block":     block_num,
-                                "trial":     i + 1,
-                                "cs_label":  cs_label,
-                                "marker":    marker,
+                                "block": block_num,
+                                "trial": i + 1,
+                                "cs_label": cs_label,
+                                "marker": marker,
                                 value_label: values[i],
-                                "shock":     int(shock_delivered)
+                                "shock": int(shock_delivered)
                             })
 
             ff.wait_to_finish_playing()
@@ -274,10 +262,8 @@ def run_block(sequence, stimuli, experiment_type, block_num, block_label,
 
             if shock_delivered:
                 precise_sleep_until(t_onset + shock_onset)
-                ff.write('num_shock',condition_shock)
                 ff.play(2, [procsser])
-                send_annotation(pub_socket, "shock", clock_offset,
-                                local_timestamp=time.time(),
+                send_annotation(pub_socket, "shock", pupil_remote,
                                 extra={"block": block_num, "trial": i + 1})
 
             precise_sleep_until(t_onset + SOA)
@@ -290,16 +276,15 @@ def run_block(sequence, stimuli, experiment_type, block_num, block_label,
             t_onset = time.time()
             ff.play(1, [procsser])
 
-            send_annotation(pub_socket, f"trial_{marker}_{cs_label}", clock_offset,
-                            local_timestamp=t_onset,
+            send_annotation(pub_socket, f"trial_{marker}_{cs_label}", pupil_remote,
                             extra={
-                                "block":     block_num,
-                                "trial":     i + 1,
-                                "cs_label":  cs_label,
-                                "marker":    marker,
+                                "block": block_num,
+                                "trial": i + 1,
+                                "cs_label": cs_label,
+                                "marker": marker,
                                 "base_freq": info['base_freq'],
-                                "pattern":   info['pattern_name'],
-                                "shock":     int(shock_delivered)
+                                "pattern": info['pattern_name'],
+                                "shock": int(shock_delivered)
                             })
 
             print(f"Trial {i + 1:3d}/{len(sequence)}: {marker} {cs_label:>3s} | "
@@ -310,10 +295,8 @@ def run_block(sequence, stimuli, experiment_type, block_num, block_label,
 
             if shock_delivered:
                 precise_sleep_until(t_onset + shock_onset + iti_within_pattern)
-                ff.write('num_shock',condition_shock)
                 ff.play(2, [procsser])
-                send_annotation(pub_socket, "shock", clock_offset,
-                                local_timestamp=time.time(),
+                send_annotation(pub_socket, "shock", pupil_remote,
                                 extra={"block": block_num, "trial": i + 1})
 
             if i + 1 < len(patterns):
@@ -325,21 +308,22 @@ def run_block(sequence, stimuli, experiment_type, block_num, block_label,
 
             precise_sleep_until(t_onset + A_SOA)
 
+        # --- Log trial ---
         trial_log.append({
-            'participant_id':  participant_id,
-            'block':           block_num,
-            'block_label':     block_label,
-            'trial_num':       i + 1,
+            'participant_id': participant_id,
+            'block': block_num,
+            'block_label': block_label,
+            'trial_num': i + 1,
             'experiment_type': experiment_type,
-            'sequence_value':  sequence[i],
-            'trial_type':      cs_label,
-            'stimulus_value':  stimulus_value,
-            'is_cs_plus':      sequence[i] == cs_plus_value,
+            'sequence_value': sequence[i],
+            'trial_type': cs_label,
+            'stimulus_value': stimulus_value,
+            'is_cs_plus': sequence[i] == cs_plus_value,
             'shock_delivered': shock_delivered,
-            'timestamp':       t_onset
+            'timestamp': t_onset
         })
 
-    send_annotation(pub_socket, f"block_{block_num}_end", clock_offset,
+    send_annotation(pub_socket, f"block_{block_num}_end", pupil_remote,
                     extra={"block_label": block_label})
 
 
@@ -351,6 +335,7 @@ if __name__ == '__main__':
     if len(sys.argv) == 2:
         seq_file = sys.argv[1]
     else:
+        import glob
         print("=== WP1 Experiment Runner ===")
         participant_id_input = int(input("Enter participant number: "))
         print("Experiment types:  f = frequency,  p = position,  a = abstract")
@@ -368,15 +353,15 @@ if __name__ == '__main__':
     with open(seq_file) as f:
         data = json.load(f)
 
-    meta               = data['metadata']
-    participant_id     = meta['participant_id']
-    experiment_type    = meta['experiment_type']
-    cs_plus_value      = meta['cs_plus_value']
-    ITI                = meta['ITI']
-    tone_duration      = meta['tone_duration']
+    meta = data['metadata']
+    participant_id   = meta['participant_id']
+    experiment_type  = meta['experiment_type']
+    cs_plus_value    = meta['cs_plus_value']
+    ITI              = meta['ITI']
+    tone_duration    = meta['tone_duration']
     iti_within_pattern = meta.get('iti_within_pattern', 0.05)
-    shock_onset        = meta.get('shock_onset_in_iti', 0.25)
-    max_cumsum         = meta.get('max_cumsum', 4)
+    shock_onset      = meta.get('shock_onset_in_iti', 0.25)
+    max_cumsum       = meta.get('max_cumsum', 4)
 
     print(f"\n{'=' * 70}")
     print(f"WP1 EXPERIMENT")
@@ -391,17 +376,10 @@ if __name__ == '__main__':
     print(f"Generated at:        {meta.get('generated_at', 'unknown')}")
     print(f"{'=' * 70}\n")
 
-    # ── Recording folder: one subfolder per participant + type ───────────────
-    recording_dir = os.path.join(
-        r"C:\Users\neurobio\Projects\WP1_roving_oddball\recordings",
-        f"sub{participant_id:03d}_{experiment_type}"
-    )
-
-    # ── Connect to Pupil Capture (must already be open) ──────────────────────
+    # ── Start Pupil Capture ──────────────────────────────────────────────────
 
     pupil_remote, pub_socket = connect_to_pupil()
-    clock_offset = measure_clock_offset(pupil_remote)
-    start_pupil_recording(pupil_remote, pub_socket, clock_offset, recording_dir)
+    start_pupil_recording(pupil_remote, pub_socket)
 
     # ── Run experiment blocks ────────────────────────────────────────────────
     trial_log = []
@@ -434,8 +412,8 @@ if __name__ == '__main__':
             SOA=ITI + tone_duration,
             tone_duration=tone_duration,
             trial_log=trial_log,
+            pupil_remote=pupil_remote,
             pub_socket=pub_socket,
-            clock_offset=clock_offset,
             reinforcement=reinforcement,
             shock_onset=shock_onset,
             max_cumsum=max_cumsum,
@@ -449,35 +427,18 @@ if __name__ == '__main__':
             input()
 
     # ── Stop Pupil recording ─────────────────────────────────────────────────
-    stop_pupil_recording(pupil_remote, pub_socket, clock_offset)
+    stop_pupil_recording(pupil_remote, pub_socket)
 
-    # ── Save behavioural CSV ─────────────────────────────────────────────────
+    # ── Save behavioural data ────────────────────────────────────────────────
     print(f"\n{'=' * 70}")
     print(f"EXPERIMENT COMPLETE")
     print(f"{'=' * 70}")
 
-    csv_filename = f"WP1_sub{participant_id:03d}_{experiment_type}_{time.strftime('%Y%m%d_%H%M%S')}.csv"
-    with open(csv_filename, 'w', newline='') as f:
+    filename = f"WP1_sub{participant_id:03d}_{experiment_type}_{time.strftime('%Y%m%d_%H%M%S')}.csv"
+    with open(filename, 'w', newline='') as f:
         writer = csv.DictWriter(f, fieldnames=trial_log[0].keys())
         writer.writeheader()
         writer.writerows(trial_log)
-    print(f"Behavioural data saved to: {csv_filename}")
 
-    # ── Save metadata (clock offset + paths) for later analysis ─────────────
-    meta_filename = csv_filename.replace('.csv', '_meta.json')
-    meta_out = {
-        "participant_id":    participant_id,
-        "experiment_type":   experiment_type,
-        "clock_offset":      clock_offset,
-        "pupil_recording_dir": recording_dir,
-        "csv_file":          csv_filename,
-        "recorded_at":       time.strftime('%Y-%m-%dT%H:%M:%S'),
-        "note": (
-            "To align CSV timestamps with Pupil data: "
-            "pupil_time = csv_timestamp + clock_offset"
-        )
-    }
-    with open(meta_filename, 'w') as f:
-        json.dump(meta_out, f, indent=2)
-    print(f"Metadata saved to:         {meta_filename}")
-    print(f"Total trials logged:       {len(trial_log)}")
+    print(f"Data saved to {filename}")
+    print(f"Total trials logged: {len(trial_log)}")

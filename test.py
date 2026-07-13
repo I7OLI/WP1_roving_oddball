@@ -13,8 +13,6 @@ import time
 import csv
 import numpy as np
 import slab
-from slab.experiments.room_voice_interference import condition
-
 import freefield as ff
 import zmq
 import msgpack as serializer
@@ -274,7 +272,6 @@ def run_block(sequence, stimuli, experiment_type, block_num, block_label,
 
             if shock_delivered:
                 precise_sleep_until(t_onset + shock_onset)
-                ff.write('num_shock',condition_shock)
                 ff.play(2, [procsser])
                 send_annotation(pub_socket, "shock", clock_offset,
                                 local_timestamp=time.time(),
@@ -310,7 +307,6 @@ def run_block(sequence, stimuli, experiment_type, block_num, block_label,
 
             if shock_delivered:
                 precise_sleep_until(t_onset + shock_onset + iti_within_pattern)
-                ff.write('num_shock',condition_shock)
                 ff.play(2, [procsser])
                 send_annotation(pub_socket, "shock", clock_offset,
                                 local_timestamp=time.time(),
