@@ -26,6 +26,7 @@ fs = 48828.125
 slab.set_default_samplerate(fs)
 rcx_file = 'shock.rcx'
 procsser = 'RM1'
+condition_shock =1
 
 ff.initialize(
     setup='headphones',
