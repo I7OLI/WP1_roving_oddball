@@ -10,7 +10,7 @@ Single mode:
 
 Output:
     WP1_sequences_n20/WP1_sub001_f_seq.json  (batch)
-    WP1_sub001_f_seq.json                     (single) bla
+    WP1_sub001_f_seq.json                     (single)
 """
 import argparse
 import json
@@ -188,18 +188,26 @@ def create_roving_sequence(train_lengths=[5, 6, 7, 8, 9, 10],
 # ============================================================================
 
 def generate_reinforcement_schedule(sequence, cs_plus_value, n_shock=100,
-                                    prob_start=0.9, prob_end=0.1):
+                                    prob_start=0.9, prob_end=0.1,
+                                    cs_minus_shocks=1, cs_plus_shocks=5):
     """
-    Deterministic reinforcement schedule. Selects exactly n_shock CS+ trials
-    for shock delivery, weighted toward early trials (linear decay).
+    Returns num_shock per trial:
+    - CS- trials: cs_minus_shocks (1) — tap control
+    - CS+ shocked trials: cs_plus_shocks (5) — cascade
+    - CS+ clean trials: 0
+
+    Uses deterministic weighted selection for which CS+ trials get shocked.
     """
     cs_plus_indices = [i for i, s in enumerate(sequence) if s == cs_plus_value]
+    cs_minus_indices = [i for i, s in enumerate(sequence) if s == -cs_plus_value]
     n_cs_plus = len(cs_plus_indices)
+    n_cs_minus = len(cs_minus_indices)
 
-    reinforcement = [False] * len(sequence)
+    # Start with 0 shocks for all
+    num_shock = [0] * len(sequence)
 
     if n_cs_plus == 0:
-        return reinforcement, {'n_cs_plus': 0, 'n_reinforced': 0, 'n_clean_cs_plus': 0}
+        return num_shock, {'n_cs_plus': 0, 'n_reinforced': 0, 'n_clean_cs_plus': 0}
 
     n_shock = min(n_shock, n_cs_plus)
 
@@ -215,25 +223,34 @@ def generate_reinforcement_schedule(sequence, cs_plus_value, n_shock=100,
 
     for rank, trial_idx in enumerate(cs_plus_indices):
         if rank in shocked_ranks:
-            reinforcement[trial_idx] = True
+            num_shock[trial_idx] = cs_plus_shocks  # cascade
+        else:
+            num_shock[trial_idx] = 0  # clean CS+
+
+    # CS- trials get 1 shock (tap control)
+    for trial_idx in cs_minus_indices:
+        num_shock[trial_idx] = cs_minus_shocks
 
     n_clean = n_cs_plus - n_shock
 
     print(f"\n{'=' * 70}")
-    print(f"REINFORCEMENT SCHEDULE (deterministic)")
+    print(f"REINFORCEMENT SCHEDULE (tap control)")
     print(f"{'=' * 70}")
     print(f"CS+ value:           {cs_plus_value:+d}")
     print(f"Total CS+ trials:    {n_cs_plus}")
-    print(f"Shocked CS+ trials:  {n_shock} (weighted {prob_start:.0%} -> {prob_end:.0%})")
-    print(f"Clean CS+ trials:    {n_clean} (for MMN)")
+    print(f"CS+ cascade (×{cs_plus_shocks}): {n_shock}")
+    print(f"CS+ clean (0):       {n_clean}")
+    print(f"CS- tap (×{cs_minus_shocks}):   {n_cs_minus}")
     print(f"{'=' * 70}\n")
 
     schedule_info = {
         'n_cs_plus': n_cs_plus,
         'n_reinforced': n_shock,
-        'n_clean_cs_plus': n_clean
+        'n_clean_cs_plus': n_clean,
+        'cs_minus_shocks': cs_minus_shocks,
+        'cs_plus_shocks': cs_plus_shocks,
     }
-    return reinforcement, schedule_info
+    return num_shock, schedule_info
 
 
 # ============================================================================
@@ -389,14 +406,14 @@ def generate_one(participant_id, experiment_type, seed, out_dir='.'):
 
         # Reinforcement schedule (conditioning block only)
         if cfg['use_reinforcement']:
-            reinforcement, reinf_info = generate_reinforcement_schedule(
+            num_shock, reinf_info = generate_reinforcement_schedule(
                 sequence, cs_plus_value,
                 n_shock=N_SHOCK,
                 prob_start=REINF_PROB_START,
                 prob_end=REINF_PROB_END
             )
         else:
-            reinforcement = None
+            num_shock = [0] * len(sequence)
             reinf_info = None
 
         blocks.append({
@@ -404,7 +421,7 @@ def generate_one(participant_id, experiment_type, seed, out_dir='.'):
             'label': cfg['label'],
             'sequence': sequence,
             'trials': trials,
-            'reinforcement': reinforcement,
+            'num_shock': num_shock,
             'reinforcement_info': reinf_info,
         })
 
@@ -445,10 +462,11 @@ def generate_one(participant_id, experiment_type, seed, out_dir='.'):
         sum(1 for s in b['sequence'] if s != 0) for b in blocks
     )
     total_shocks = sum(
-        sum(1 for r in (b['reinforcement'] or []) if r) for b in blocks
+        sum(b['num_shock']) for b in blocks
     )
+    cs_plus_val = cs_plus_value
 
-    print(f"  -> {filename} ({total_trials} trials)")
+    print(f"  -> {filename} ({total_trials} trials, {total_deviants} deviants, {total_shocks} total shocks)")
 
     return {
         'participant_id': participant_id,
