@@ -93,8 +93,9 @@ def create_sounds(trials, experiment_type, tone_duration, iti_within_pattern=0.0
 # ============================================================================
 
 def run_block(sequence, stimuli, experiment_type, block_num, block_label,
-              participant_id, cs_plus_value,SOA, trial_log,
-              reinforcement=None, shock_onset=0.25, max_cumsum=4):
+              participant_id, cs_plus_value, SOA, trial_log,
+              reinforcement=None, shock_onset=0.25, max_cumsum=4,
+              ITI=None, tone_duration=None, iti_within_pattern=0.05):
     """Play one block and log all trials."""
     print(f"\n{'=' * 70}")
     print(f"PLAYING BLOCK {block_num}: {block_label}")
@@ -129,7 +130,7 @@ def run_block(sequence, stimuli, experiment_type, block_num, block_label,
         if experiment_type in ['f', 'p']:
 
             stimulus_value = values[i]
-            tones.play()
+            tones[i].play()
             print(f"Tone {i + 1:3d}/{len(sequence)}: {marker} {cs_label:>3s} | "
                   f"{value_label}={values[i]:7.1f} {value_unit} | "
                   f"index={indices[i] - max_cumsum}"
@@ -155,7 +156,7 @@ def run_block(sequence, stimuli, experiment_type, block_num, block_label,
             stimulus_value = info['base_freq']
 
             t_onset = time.time()
-            patterns.play()
+            patterns[i].play()
             print(f"Trial {i + 1:3d}/{len(sequence)}: {marker} {cs_label:>3s} | "
                   f"{info['pattern_name']:>8s} | base={info['base_freq']:.0f}Hz "
                   f"tones={freqs_str}{' | SHOCK' if shock_delivered else ''}")

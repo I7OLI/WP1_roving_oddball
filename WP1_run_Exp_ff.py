@@ -16,7 +16,7 @@ import slab
 from slab.experiments.room_voice_interference import condition
 
 import freefield as ff
-import zmq
+#  import zmq
 import msgpack as serializer
 
 # ============================================================================
