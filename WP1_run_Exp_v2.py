@@ -27,12 +27,29 @@ import json
 import time
 import csv
 
+import argparse
+
 import numpy as np
 import slab
 
 import freefield as ff
-import zmq
-import msgpack as serializer
+
+# zmq / msgpack are only needed when recording with Pupil. Import lazily so the
+# script still runs on a machine without them when USE_PUPIL is False.
+try:
+    import zmq
+    import msgpack as serializer
+except ImportError:
+    zmq = None
+    serializer = None
+
+# ============================================================================
+# PUPIL TOGGLE
+# ============================================================================
+# Set this to False to run WITHOUT the Pupil Labs eye-tracker (no recording,
+# no annotations, no waiting for Pupil Capture). Can also be overridden on the
+# command line with  --pupil  /  --no-pupil .
+USE_PUPIL = True
 
 # ============================================================================
 # COLUMN LAYOUT (must match WP1_generate_seq_v2.py)
@@ -100,6 +117,8 @@ def pupil_notify(pupil_remote, notification):
 
 def send_annotation(pub_socket, label, clock_offset,
                     local_timestamp=None, duration=0.0, extra=None):
+    if pub_socket is None:      # Pupil disabled -> annotations are no-ops
+        return
     if local_timestamp is None:
         local_timestamp = time.time()
     pupil_timestamp = local_timestamp + clock_offset
@@ -323,9 +342,24 @@ def run_block(block_meta, trials, tones, participant_id,
 # ============================================================================
 
 if __name__ == '__main__':
+    parser = argparse.ArgumentParser(description='Run WP1 v2 experiment.')
+    parser.add_argument('seq_file', nargs='?', default=None,
+                        help='Path to the WP1_..._v2_seq.npy file')
+    parser.add_argument('--pupil', dest='pupil', action='store_true',
+                        help='Force Pupil recording ON')
+    parser.add_argument('--no-pupil', dest='pupil', action='store_false',
+                        help='Run WITHOUT Pupil recording')
+    parser.set_defaults(pupil=USE_PUPIL)
+    args = parser.parse_args()
+
+    use_pupil = args.pupil
+    if use_pupil and zmq is None:
+        print("WARNING: pyzmq / msgpack not installed -> running WITHOUT Pupil.")
+        use_pupil = False
+
     # --- Resolve the .npy + .json artefacts ---------------------------------
-    if len(sys.argv) == 2:
-        npy_file = sys.argv[1]
+    if args.seq_file is not None:
+        npy_file = args.seq_file
     else:
         print("=== WP1 Experiment Runner (v2) ===")
         participant_id_input = int(input("Enter participant number: "))
@@ -372,6 +406,7 @@ if __name__ == '__main__':
     print(f"Blocks:          {len(blocks)}")
     print(f"CS+ assignment:  {meta.get('cs_plus_assignment')}")
     print(f"Seed:            {meta.get('random_seed', 'unknown')}")
+    print(f"Pupil recording: {'ON' if use_pupil else 'OFF'}")
     print(f"{'=' * 70}\n")
 
     # --- Recording folder ---------------------------------------------------
@@ -381,9 +416,14 @@ if __name__ == '__main__':
     )
 
     # --- Connect to Pupil Capture (must already be open) --------------------
-    pupil_remote, pub_socket = connect_to_pupil()
-    clock_offset = measure_clock_offset(pupil_remote)
-    start_pupil_recording(pupil_remote, pub_socket, clock_offset, recording_dir)
+    if use_pupil:
+        pupil_remote, pub_socket = connect_to_pupil()
+        clock_offset = measure_clock_offset(pupil_remote)
+        start_pupil_recording(pupil_remote, pub_socket, clock_offset, recording_dir)
+    else:
+        pupil_remote, pub_socket = None, None
+        clock_offset = 0.0
+        print(">>> Running WITHOUT Pupil (no eye recording / annotations) <<<\n")
 
     # --- Run each block -----------------------------------------------------
     trial_log = []
@@ -424,7 +464,8 @@ if __name__ == '__main__':
             input()
 
     # --- Stop recording -----------------------------------------------------
-    stop_pupil_recording(pupil_remote, pub_socket, clock_offset)
+    if use_pupil:
+        stop_pupil_recording(pupil_remote, pub_socket, clock_offset)
 
     print(f"\n{'=' * 70}")
     print(f"EXPERIMENT COMPLETE")
