@@ -49,7 +49,7 @@ except ImportError:
 # Set this to False to run WITHOUT the Pupil Labs eye-tracker (no recording,
 # no annotations, no waiting for Pupil Capture). Can also be overridden on the
 # command line with  --pupil  /  --no-pupil .
-USE_PUPIL = True
+USE_PUPIL = False
 
 # ============================================================================
 # COLUMN LAYOUT (must match WP1_generate_seq_v2.py)
