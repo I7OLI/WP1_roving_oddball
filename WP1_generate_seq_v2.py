@@ -7,7 +7,7 @@ Difference from v1:
 
         column 0 : frequency step   (-1 down / 0 stay / +1 up)   -- roving
         column 1 : azimuth  step    (-1 down / 0 stay / +1 up)   -- roving
-        column 2 : shock            (0 none / 1 tap CS- / 5 cascade CS+)
+        column 2 : shock            (0 none / 1 tap CS- / 2 cascade CS+)
 
     A trial only ever carries a deviant in ONE stimulus column at a time. The
     run-script iterates rows and maintains a per-modality roving index,
@@ -80,7 +80,7 @@ from WP1_generate_seq import (
 # ============================================================================
 COL_FREQ = 0      # frequency step  (-1/0/+1)
 COL_AZI = 1       # azimuth  step  (-1/0/+1)
-COL_SHOCK = 2     # shock amount   (0/1/5)
+COL_SHOCK = 2     # shock amount   (0/1/2)
 N_COLS = 3
 
 # Which stimulus column each modality writes its roving steps into.
@@ -270,7 +270,7 @@ def generate_one_v2(participant_id, exp_type, seed, out_dir='.'):
         # array description
         'array_shape': list(seq_array.shape),
         'columns': {'freq_step': COL_FREQ, 'azi_step': COL_AZI, 'shock': COL_SHOCK},
-        'shock_codes': {'none': 0, 'cs_minus_tap': 1, 'cs_plus_cascade': 5},
+        'shock_codes': {'none': 0, 'cs_minus_tap': 1, 'cs_plus_cascade': 2},
         # stimulus resolution tables (roving walks these with index clamping)
         'frequency_list': FREQUENCY_LIST,
         'position_list': POSITION_LIST,
