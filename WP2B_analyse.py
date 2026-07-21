@@ -2,8 +2,10 @@
 WP2B — offline analysis of saved pre/post JSON
 ==============================================
 
-    python WP2B_analyse.py --pre sub-101_pre.json --post sub-101_post.json --dim ITD
-    python WP2B_analyse.py --dir ./data --dim ITD          # all sub-*_pre/post pairs
+    python WP2B_analyse.py sub-1_pre.json  --dim ITD   # partner found automatically
+    python WP2B_analyse.py sub-1_post.json --dim ITD   # either half works
+    python WP2B_analyse.py ./data          --dim ITD   # every pair in a folder
+    python WP2B_analyse.py --pre a.json --post b.json --dim ITD   # explicit
 
 The conditioned dimension is NOT stored in the JSON, so --dim is required.
 
@@ -189,32 +191,72 @@ def analyse(pre, post, cond_dim, label=''):
 # MAIN
 # ════════════════════════════════════════════════════════════════════
 
+def resolve_pairs(path):
+    """Accept a folder OR either half of a pre/post pair, return [(pre, post)].
+
+    Pointing at sub-1_pre.json finds sub-1_post.json automatically, and
+    vice versa — so it does not matter which half you name.
+    """
+    path = os.path.expanduser(path)
+
+    if os.path.isdir(path):
+        pairs = []
+        for pre_path in sorted(glob.glob(os.path.join(path, '*_pre.json'))):
+            post_path = pre_path[:-len('_pre.json')] + '_post.json'
+            if os.path.exists(post_path):
+                pairs.append((pre_path, post_path))
+            else:
+                print(f"  ! {os.path.basename(pre_path)} has no _post partner "
+                      f"— skipping")
+        # warn about orphaned post files too, rather than silently ignoring
+        for post_path in sorted(glob.glob(os.path.join(path, '*_post.json'))):
+            if not os.path.exists(post_path[:-len('_post.json')] + '_pre.json'):
+                print(f"  ! {os.path.basename(post_path)} has no _pre partner "
+                      f"— skipping")
+        return pairs
+
+    if os.path.isfile(path):
+        if path.endswith('_pre.json'):
+            pre_path = path
+            post_path = path[:-len('_pre.json')] + '_post.json'
+        elif path.endswith('_post.json'):
+            post_path = path
+            pre_path = path[:-len('_post.json')] + '_pre.json'
+        else:
+            raise SystemExit(f"'{path}' is not a *_pre.json or *_post.json file.")
+
+        missing = [p for p in (pre_path, post_path) if not os.path.exists(p)]
+        if missing:
+            raise SystemExit(f"Missing partner file: {missing[0]}")
+        return [(pre_path, post_path)]
+
+    raise SystemExit(f"No such file or directory: {path}")
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument('--pre')
-    ap.add_argument('--post')
-    ap.add_argument('--dir', help='directory of sub-*_pre.json / sub-*_post.json')
+    ap.add_argument('path', nargs='?',
+                    help='a folder of results, OR either half of a pre/post '
+                         'pair (the partner is found automatically)')
+    ap.add_argument('--pre', help='explicit pre file (overrides positional)')
+    ap.add_argument('--post', help='explicit post file (overrides positional)')
     ap.add_argument('--dim', required=True, choices=['ITD', 'ILD'],
                     help='conditioned dimension (not stored in the JSON)')
     args = ap.parse_args()
 
-    pairs = []
-    if args.dir:
-        for pre_path in sorted(glob.glob(os.path.join(args.dir, '*_pre.json'))):
-            post_path = pre_path.replace('_pre.json', '_post.json')
-            if os.path.exists(post_path):
-                pairs.append((pre_path, post_path))
-            else:
-                print(f"  ! no post file for {pre_path}, skipping")
-    elif args.pre and args.post:
-        pairs.append((args.pre, args.post))
+    if args.pre and args.post:
+        pairs = [(args.pre, args.post)]
+    elif args.path:
+        pairs = resolve_pairs(args.path)
     else:
-        ap.error('give --pre and --post, or --dir')
+        ap.error('give a folder or file path, or both --pre and --post')
 
     if not pairs:
         print("No pre/post pairs found.")
         return
+
+    print(f"Found {len(pairs)} pre/post pair(s).")
 
     summary = []
     for pre_path, post_path in pairs:
