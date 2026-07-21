@@ -2,12 +2,10 @@
 WP2B — offline analysis of saved pre/post JSON
 ==============================================
 
-    python WP2B_analyse.py sub-1_pre.json  --dim ITD   # partner found automatically
-    python WP2B_analyse.py sub-1_post.json --dim ITD   # either half works
-    python WP2B_analyse.py ./data          --dim ITD   # every pair in a folder
-    python WP2B_analyse.py --pre a.json --post b.json --dim ITD   # explicit
+Edit the CONFIG block at the top, then just hit Run.
 
-The conditioned dimension is NOT stored in the JSON, so --dim is required.
+The conditioned dimension is NOT stored in the JSON, so you have to set it
+here yourself.
 
 
 WHY THIS SEPARATES TWO EFFECTS
@@ -31,12 +29,39 @@ k is bias-free by construction, so weights computed from k are immune to a
 lateral shift. That is the key improvement over using raw PSEs.
 """
 
-import argparse
 import glob
 import json
 import os
 
 import numpy as np
+
+# ════════════════════════════════════════════════════════════════════
+#  CONFIG  —  edit these, then Run
+# ════════════════════════════════════════════════════════════════════
+
+# Where the sub-*_pre.json / sub-*_post.json files live.
+DATA_DIR = '/Users/oliver/PycharmProjects/WP1_roving_oddball'
+
+# Which participant to analyse.
+#   None  ->  every pre/post pair in DATA_DIR, plus a group summary
+#   '1'   ->  just sub-1
+#   ['1', '3']  ->  only those
+SUBJECT = None
+
+# Which cue was CS+ during conditioning: 'ITD' or 'ILD'.
+COND_DIM = 'ITD'
+
+# If different participants got different conditioned cues, list the
+# exceptions here. Anything not listed uses COND_DIM above.
+#   e.g.  SUBJECT_DIMS = {'2': 'ILD', '5': 'ILD'}
+SUBJECT_DIMS = {}
+
+# Filename pattern. Change only if you renamed your output files.
+PRE_SUFFIX  = '_pre.json'
+POST_SUFFIX = '_post.json'
+SUBJECT_PREFIX = 'sub-'
+
+# ════════════════════════════════════════════════════════════════════
 
 ANCHOR_DEG = 10
 CONDITIONS = ['ITD_anchor_LEFT', 'ITD_anchor_RIGHT',
@@ -191,81 +216,68 @@ def analyse(pre, post, cond_dim, label=''):
 # MAIN
 # ════════════════════════════════════════════════════════════════════
 
-def resolve_pairs(path):
-    """Accept a folder OR either half of a pre/post pair, return [(pre, post)].
+def find_pairs():
+    """Collect (subject_id, pre_path, post_path) using the CONFIG block."""
+    folder = os.path.expanduser(DATA_DIR)
+    if not os.path.isdir(folder):
+        raise SystemExit(f"DATA_DIR does not exist:\n    {folder}\n"
+                         f"Edit DATA_DIR at the top of this file.")
 
-    Pointing at sub-1_pre.json finds sub-1_post.json automatically, and
-    vice versa — so it does not matter which half you name.
-    """
-    path = os.path.expanduser(path)
+    # which subjects to look at
+    if SUBJECT is None:
+        wanted = None
+    elif isinstance(SUBJECT, str):
+        wanted = [SUBJECT]
+    else:
+        wanted = list(SUBJECT)
 
-    if os.path.isdir(path):
-        pairs = []
-        for pre_path in sorted(glob.glob(os.path.join(path, '*_pre.json'))):
-            post_path = pre_path[:-len('_pre.json')] + '_post.json'
-            if os.path.exists(post_path):
-                pairs.append((pre_path, post_path))
-            else:
-                print(f"  ! {os.path.basename(pre_path)} has no _post partner "
-                      f"— skipping")
-        # warn about orphaned post files too, rather than silently ignoring
-        for post_path in sorted(glob.glob(os.path.join(path, '*_post.json'))):
-            if not os.path.exists(post_path[:-len('_post.json')] + '_pre.json'):
-                print(f"  ! {os.path.basename(post_path)} has no _pre partner "
-                      f"— skipping")
-        return pairs
+    pairs = []
+    for pre_path in sorted(glob.glob(os.path.join(folder, '*' + PRE_SUFFIX))):
+        stem = os.path.basename(pre_path)[:-len(PRE_SUFFIX)]        # 'sub-1'
+        sid  = stem[len(SUBJECT_PREFIX):] if stem.startswith(SUBJECT_PREFIX) else stem
 
-    if os.path.isfile(path):
-        if path.endswith('_pre.json'):
-            pre_path = path
-            post_path = path[:-len('_pre.json')] + '_post.json'
-        elif path.endswith('_post.json'):
-            post_path = path
-            pre_path = path[:-len('_post.json')] + '_pre.json'
+        if wanted is not None and sid not in wanted and stem not in wanted:
+            continue
+
+        post_path = pre_path[:-len(PRE_SUFFIX)] + POST_SUFFIX
+        if os.path.exists(post_path):
+            pairs.append((sid, pre_path, post_path))
         else:
-            raise SystemExit(f"'{path}' is not a *_pre.json or *_post.json file.")
+            print(f"  ! {os.path.basename(pre_path)} has no "
+                  f"{POST_SUFFIX} partner — skipping")
 
-        missing = [p for p in (pre_path, post_path) if not os.path.exists(p)]
-        if missing:
-            raise SystemExit(f"Missing partner file: {missing[0]}")
-        return [(pre_path, post_path)]
+    # flag orphaned post files rather than silently ignoring them
+    for post_path in sorted(glob.glob(os.path.join(folder, '*' + POST_SUFFIX))):
+        if not os.path.exists(post_path[:-len(POST_SUFFIX)] + PRE_SUFFIX):
+            print(f"  ! {os.path.basename(post_path)} has no "
+                  f"{PRE_SUFFIX} partner — skipping")
 
-    raise SystemExit(f"No such file or directory: {path}")
+    if not pairs:
+        if wanted is not None:
+            raise SystemExit(
+                f"No files matching SUBJECT = {SUBJECT!r} in:\n    {folder}\n"
+                f"Expected e.g. {SUBJECT_PREFIX}{wanted[0]}{PRE_SUFFIX}")
+        raise SystemExit(f"No *{PRE_SUFFIX} files found in:\n    {folder}")
+
+    return pairs
 
 
 def main():
-    ap = argparse.ArgumentParser(description=__doc__,
-                                 formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument('path', nargs='?',
-                    help='a folder of results, OR either half of a pre/post '
-                         'pair (the partner is found automatically)')
-    ap.add_argument('--pre', help='explicit pre file (overrides positional)')
-    ap.add_argument('--post', help='explicit post file (overrides positional)')
-    ap.add_argument('--dim', required=True, choices=['ITD', 'ILD'],
-                    help='conditioned dimension (not stored in the JSON)')
-    args = ap.parse_args()
-
-    if args.pre and args.post:
-        pairs = [(args.pre, args.post)]
-    elif args.path:
-        pairs = resolve_pairs(args.path)
-    else:
-        ap.error('give a folder or file path, or both --pre and --post')
-
-    if not pairs:
-        print("No pre/post pairs found.")
-        return
-
+    pairs = find_pairs()
+    print(f"\nDATA_DIR : {DATA_DIR}")
+    print(f"SUBJECT  : {'all' if SUBJECT is None else SUBJECT}")
     print(f"Found {len(pairs)} pre/post pair(s).")
 
     summary = []
-    for pre_path, post_path in pairs:
+    for sid, pre_path, post_path in pairs:
         with open(pre_path) as f:
             pre = json.load(f)
         with open(post_path) as f:
             post = json.load(f)
-        label = os.path.basename(pre_path).replace('_pre.json', '')
-        out = analyse(pre, post, args.dim, label)
+
+        dim = SUBJECT_DIMS.get(sid, COND_DIM)
+        label = os.path.basename(pre_path)[:-len(PRE_SUFFIX)]
+        out = analyse(pre, post, dim, label)
         if out:
             summary.append(out)
 
@@ -276,7 +288,7 @@ def main():
         print(f"{'=' * 68}")
         dw = np.array([s['delta_weight'] for s in summary])
         db = np.array([s['delta_bias'] for s in summary])
-        print(f"\n  Δweight({args.dim}):  mean={dw.mean():+.3f}  "
+        print(f"\n  Δweight(CS+):   mean={dw.mean():+.3f}  "
               f"SD={dw.std(ddof=1):.3f}  "
               f"| same sign in {max((dw > 0).sum(), (dw < 0).sum())}/{len(dw)}")
         print(f"  Δbias:          mean={db.mean():+.2f}°  "
