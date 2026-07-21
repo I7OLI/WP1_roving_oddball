@@ -61,6 +61,26 @@ USE_PUPIL = True
 SHOCK_HIGH = 4                      # CS+ cascade  (change this per session)
 SHOCK_LOW = 1                       # CS- tap control
 
+# ============================================================================
+# OUTPUT LEVEL
+# ============================================================================
+# slab's default tone level puts the peak at ~0.09 of full scale, i.e. ~16 dB
+# of unused headroom, which forces the amplifier gain up and makes its noise
+# floor audible as a buzz. Worst-case peak across all freq x azimuth combos is
+# 0.160, so x5.0 lands at 0.80 peak with room to spare.
+#
+# CRITICAL: this is ONE GLOBAL constant applied equally to both channels.
+# Do NOT normalise per trial or per channel — the interaural level difference
+# IS the azimuth cue, and per-trial normalisation would destroy it.
+#
+# CALIBRATION: raising this WILL make the output louder. Turn the amplifier
+# down by the same amount (x5.0 = 14 dB) and re-verify dB SPL at the ear with
+# a meter before collecting data. Loudness drives pupil dilation, so a level
+# change silently breaks comparability with anything recorded at the old
+# setting. Set to 1.0 to reproduce the previous (buzzy) behaviour exactly.
+OUTPUT_SCALE = 5.0
+MAX_SAFE_PEAK = 0.95                # warn if scaling pushes us near clipping
+
 # Array columns (must match WP1_generate_seq_v2.py)
 COL_FREQ, COL_AZI, COL_SHOCK = 0, 1, 2
 COL_PATTERN, COL_BASEFREQ = 3, 4
@@ -166,12 +186,32 @@ def precise_sleep_until(target_time, busy_wait_threshold=0.002):
         pass
 
 
+_clip_warned = False
+
+
 def load_tone(tone):
-    """Write one binaural tone into the RM1 play buffer."""
+    """
+    Write one binaural stimulus into the RM1 play buffer.
+
+    Applies OUTPUT_SCALE equally to both channels — a single global gain, so
+    the interaural level difference (the azimuth cue) is preserved exactly.
+    Buffers are flattened to 1-D, since tone.left.data is a (n, 1) column.
+    """
+    global _clip_warned
+    left = np.asarray(tone.left.data, dtype=float).flatten() * OUTPUT_SCALE
+    right = np.asarray(tone.right.data, dtype=float).flatten() * OUTPUT_SCALE
+
+    peak = max(np.abs(left).max(), np.abs(right).max())
+    if peak > MAX_SAFE_PEAK and not _clip_warned:
+        print(f"\n*** WARNING: peak {peak:.3f} exceeds {MAX_SAFE_PEAK} with "
+              f"OUTPUT_SCALE={OUTPUT_SCALE}. Reduce OUTPUT_SCALE or you will "
+              f"clip. (This warning prints once.) ***\n")
+        _clip_warned = True
+
     ff.write('playbuflen', len(tone), procsser)
-    ff.write('data_l', tone.left.data, procsser)
+    ff.write('data_l', left, procsser)
     ff.write('chan_l', 1, procsser)
-    ff.write('data_r', tone.right.data, procsser)
+    ff.write('data_r', right, procsser)
     ff.write('chan_r', 2, procsser)
 
 
@@ -444,6 +484,8 @@ if __name__ == '__main__':
     print(f"SOA:             {SOA * 1000:.0f} ms  (stimulus span {stim_span * 1000:.0f} ms)")
     print(f"Shock at:        {shock_time * 1000:.0f} ms from onset "
           f"({shock_delay * 1000:+.0f} ms rel. stimulus offset)")
+    print(f"Output scale:    x{OUTPUT_SCALE:g}"
+          f"{'  <-- CHECK AMP GAIN / SPL CALIBRATION' if OUTPUT_SCALE != 1.0 else ''}")
     print(f"Seed:            {meta.get('random_seed', 'unknown')}")
     print(f"Pupil recording: {'ON' if use_pupil else 'OFF'}\n{'=' * 70}\n")
 

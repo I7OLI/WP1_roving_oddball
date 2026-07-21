@@ -116,6 +116,18 @@ A_SOA = 0.65
 SHOCK_DELAY_AFTER_OFFSET = SHOCK_ONSET_IN_ITI - TONE_DURATION   # 0.0 s
 
 
+# In the "both" session types the two stimulus dimensions run as INDEPENDENT
+# concurrent streams over one shared trial timeline — each keeps its own train
+# structure and its own full deviant budget. A frequency change may therefore be
+# followed a trial or two later by an azimuth change.
+#
+# MIN_MODALITY_SEPARATION is the minimum number of trials between a deviant in
+# one dimension and a deviant in the other. 2 means: never simultaneous, never
+# adjacent. Set to 1 to allow adjacent-but-not-simultaneous, or 0 to allow
+# genuine compound deviants.
+MIN_MODALITY_SEPARATION = 2
+
+
 def soa_for_type(exp_type):
     """Pattern sessions run at A_SOA; everything else at the standard SOA."""
     return A_SOA if exp_type == 'a' else SOA
@@ -445,47 +457,67 @@ BLOCK_PLAN_V2 = [
 # ============================================================================
 # BLOCK CONSTRUCTION
 # ============================================================================
-def split_into_trains(sequence):
-    """Split a roving sequence into trains: each train = standards + 1 deviant."""
-    trains, cur = [], []
-    for s in sequence:
-        cur.append(int(s))
-        if s != 0:            # deviant terminates the train
-            trains.append(cur)
-            cur = []
-    if cur:                   # trailing standards (no deviant) — keep them
-        trains.append(cur)
-    return trains
-
-
-def merge_trains_preserving_order(streams):
+def enforce_min_separation(anchor, mover, min_sep=MIN_MODALITY_SEPARATION, pad=500):
     """
-    Merge several ordered lists of trains into one interleaved order.
+    Move `mover`'s deviants so no deviant sits within `min_sep - 1` trials of
+    any `anchor` deviant. (min_sep=2 -> never on the same trial, never adjacent.)
 
-    Two guarantees:
-      1. Each stream's internal order is preserved (we always take the next
-         train off the front), so per-dimension cumsum balance survives.
-      2. The features are spread EVENLY across the whole block (no clustering):
-         at each step we emit whichever modality is furthest behind its target
-         share (emitted / total). For equal deviant counts this yields near-
-         strict F/A alternation; ties are broken randomly to avoid rhythmicity.
+    The anchor stream is untouched: it is the CS+ modality, whose timing drives
+    conditioning, so it must not be perturbed.
 
-    `streams` is a dict: modality -> list of trains.
-    Returns a list of (modality, train) tuples.
+    What is preserved EXACTLY:
+      * the number of deviants in `mover`
+      * their VALUES and their ORDER  -> the +/-MAX_CUMSUM balance is unaffected
+    What changes:
+      * deviant POSITIONS shift by a trial or two, so a few of `mover`'s train
+        lengths fall outside the nominal train_lengths range.
+
+    Returns (anchor, mover, n_moved, shifts).
     """
-    queues = {m: list(trains) for m, trains in streams.items()}
-    totals = {m: len(q) for m, q in queues.items()}
-    emitted = {m: 0 for m in queues}
-    grand = sum(totals.values())
+    n = max(len(anchor), len(mover)) + pad
+    a_full = np.zeros(n, dtype=int); a_full[:len(anchor)] = anchor
+    m_full = np.zeros(n, dtype=int); m_full[:len(mover)] = mover
 
-    out = []
-    for _ in range(grand):
-        cand = [m for m in queues if queues[m]]
-        random.shuffle(cand)                       # random tie-break
-        pick = min(cand, key=lambda m: emitted[m] / totals[m])
-        out.append((pick, queues[pick].pop(0)))
-        emitted[pick] += 1
-    return out
+    forbidden = np.zeros(n, dtype=bool)
+    a_pos = np.flatnonzero(a_full)
+    for off in range(-(min_sep - 1), min_sep):
+        idx = a_pos + off
+        forbidden[idx[(idx >= 0) & (idx < n)]] = True
+
+    old_pos = list(np.flatnonzero(m_full))
+    values = [int(m_full[i]) for i in old_pos]
+
+    new_pos, taken, prev, n_moved = [], set(), -1, 0
+    for p in old_pos:
+        chosen = None
+        for d in range(n):                     # search outward from p
+            for cand in ([p] if d == 0 else [p - d, p + d]):
+                if cand <= prev or cand < 0 or cand >= n:
+                    continue
+                if forbidden[cand] or cand in taken:
+                    continue
+                chosen = cand
+                break
+            if chosen is not None:
+                break
+        if chosen is None:
+            raise RuntimeError(
+                f"Could not place deviant {len(new_pos) + 1}/{len(old_pos)} with "
+                f"min_sep={min_sep}. The timeline is too crowded — reduce "
+                f"n_deviants or min_sep.")
+        if chosen != p:
+            n_moved += 1
+        new_pos.append(chosen)
+        taken.add(chosen)
+        prev = chosen
+
+    out = np.zeros(n, dtype=int)
+    for pos, val in zip(new_pos, values):
+        out[pos] = val
+
+    used = max(np.flatnonzero(a_full).max(), np.flatnonzero(out).max()) + 1
+    shifts = [b - a for a, b in zip(old_pos, new_pos)]
+    return a_full[:used], out[:used], n_moved, shifts
 
 
 def build_block(n_deviants, modalities, cs_plus_modality, cs_plus_value,
@@ -512,25 +544,43 @@ def build_block(n_deviants, modalities, cs_plus_modality, cs_plus_value,
         block[:, COL_BASEFREQ] = NO_BASEFREQ
         block[:, MODALITY_COL[m]] = seq
     else:
-        # Split the deviant budget evenly across the two modalities.
-        per_mod = n_deviants // len(modalities)
+        # TWO INDEPENDENT CONCURRENT STREAMS.
+        #
+        # Each modality gets the FULL deviant budget and its own train
+        # structure, then both are overlaid on one shared trial timeline. This
+        # is deliberately NOT an interleave of whole trains: the dimensions are
+        # independent, so a frequency change can be followed a trial or two
+        # later by an azimuth change.
+        #
+        # Because the streams are concurrent rather than concatenated, the
+        # block is the length of ONE stream, not the sum — deviant DENSITY
+        # doubles, session duration does not.
         streams = {}
         for m in modalities:
-            seq, _ = create_roving_sequence(n_deviants=per_mod,
+            seq, _ = create_roving_sequence(n_deviants=n_deviants,
                                             max_cumsum=MAX_CUMSUM, soa=soa)
-            streams[m] = split_into_trains(seq)
-        merged = merge_trains_preserving_order(streams)
+            streams[m] = np.asarray(seq, dtype=int)
 
-        rows = []
-        for m, train in merged:
-            col = MODALITY_COL[m]
-            for s in train:
-                row = [0] * N_COLS
-                row[COL_BASEFREQ] = NO_BASEFREQ
-                if s != 0:
-                    row[col] = s
-                rows.append(row)
-        block = np.asarray(rows, dtype=int)
+        # The CS+ modality anchors the timeline; the other one yields, so
+        # conditioning timing is never perturbed.
+        other = [m for m in modalities if m != cs_plus_modality]
+        if len(streams) != 2 or not other:
+            raise ValueError(f"expected exactly 2 modalities incl. the CS+, got {modalities}")
+        mover_mod = other[0]
+
+        anchor, mover, n_moved, shifts = enforce_min_separation(
+            streams[cs_plus_modality], streams[mover_mod])
+
+        block = np.zeros((len(anchor), N_COLS), dtype=int)
+        block[:, COL_BASEFREQ] = NO_BASEFREQ
+        block[:, MODALITY_COL[cs_plus_modality]] = anchor
+        block[:, MODALITY_COL[mover_mod]] = mover
+
+        max_shift = max((abs(s) for s in shifts), default=0)
+        print(f"  Concurrent streams: {cs_plus_modality} (anchor, CS+) + "
+              f"{mover_mod} (moved to keep >= {MIN_MODALITY_SEPARATION} trials apart)")
+        print(f"    {n_moved}/{len(shifts)} {mover_mod}-deviants shifted "
+              f"(mean |shift| {np.mean(np.abs(shifts)) if shifts else 0:.2f}, max {max_shift})")
 
     # Abstract-pattern trials need a base frequency drawn for EVERY row
     # (standards included), pre-drawn here so the .npy is fully deterministic.
@@ -664,6 +714,10 @@ def generate_one_v2(participant_id, exp_type, seed, out_dir='.'):
         'A_SOA': A_SOA,
         'stim_span': stim_span,           # on-air duration of one trial's stimulus
         'max_cumsum': MAX_CUMSUM,
+        # In 'both' sessions the dimensions run as independent concurrent
+        # streams, each with the full deviant budget, kept this many trials apart.
+        'concurrent_streams': len(modalities) > 1,
+        'min_modality_separation': MIN_MODALITY_SEPARATION if len(modalities) > 1 else None,
         'shock_onset_in_iti': SHOCK_ONSET_IN_ITI,
         # Shock fires at:  onset + stim_span + shock_delay_after_offset.
         # One rule for single tones and patterns alike.
