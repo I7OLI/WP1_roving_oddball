@@ -41,7 +41,7 @@ F0        = 700           # centre frequency of the noise band (Hz)
 BANDWIDTH_OCT = 1 / 3     # one-third-octave noise band
 HEAD_RADIUS_CM = 8.75     # slab default; used for natural ITD mapping
 LEVEL     = 65            # dB SPL (nominal; requires playback calibration)
-
+SILENCE   = slab.Sound.silence(0.1,FS,2)
 ANCHOR_DEG = 10           # fixed anchor position (1
 # degrees)
 # Rove only on the OPPOSITE side of the anchor:
@@ -177,29 +177,55 @@ def get_response():
 # ════════════════════════════════════════════════════════════════════
 # PLAY ONE TWO-TONE TRIAL  (reference, then test → judgement)
 # ════════════════════════════════════════════════════════════════════
-def _play(sound):
+def precise_sleep_until(target_time, busy_wait_threshold=0.002):
+    """Sleep until target_time, busy-waiting the last ~2 ms for accuracy."""
+    remaining = target_time - time.time()
+    if remaining > busy_wait_threshold:
+        time.sleep(remaining - busy_wait_threshold)
+    while time.time() < target_time:
+        pass
+
+
+def _makeSound(itd, ild):
+    """Reference + ISI silence + test as ONE buffer.
+
+    Concatenating makes the reference->test interval sample-exact, instead
+    of it being whatever the USB write between them happened to take.
+    """
+    token = make_noise_token()
+    reference = make_ref_sound(token)
+    test = make_stimulus(itd, ild, token)
+    return slab.Binaural(slab.Sound.sequence(reference, SILENCE, test))
+
+
+def trial_to_itd_ild(t):
+    """Map a trial dict onto (itd_deg, ild_deg)."""
+    if t['anchor_cue'] == 'ITD':
+        return t['anchor_val'], t['rove_val']
+    return t['rove_val'], t['anchor_val']
+
+
+def _write(sound):
+    """Transfer a buffer to the RM1. Must complete before _play()."""
     ff.write('playbuflen', len(sound), PROC)
     ff.write('data_l', sound.left.data, PROC)
     ff.write('chan_l', 1, PROC)
     ff.write('data_r', sound.right.data, PROC)
     ff.write('chan_r', 2, PROC)
+
+
+def _play():
+    """Trigger the buffer already loaded on the RM1, then collect a response.
+
+    Takes no argument on purpose: writing and playing are decoupled so the
+    write for trial i+1 can happen in trial i's dead time.
+    Returns (response, onset_timestamp).
+    """
+    t_onset = time.time()
     ff.play(1, [PROC])
-
-
-def play_two_tone(itd, ild):
-    """Reference (centre) then test sound; return 'left'/'right'/None."""
-    # Generate exactly one token per trial and use it for both intervals.
-    token = make_noise_token()
-    reference = make_ref_sound(token)
-    test = make_stimulus(itd, ild, token)
-
-    _play(reference)
     ff.wait_to_finish_playing()
-    _play(test)
     resp = get_response()
-    ff.wait_to_finish_playing()
-    return resp
-
+    return resp, t_onset
 
 # ════════════════════════════════════════════════════════════════════
 # TRIAL LIST  — every condition × probe × repetition, shuffled
@@ -230,17 +256,35 @@ def generate_conflict_trials(phase='pre'):
 # RUN ONE CONFLICT BLOCK
 # ════════════════════════════════════════════════════════════════════
 def run_conflict_block(trials, block_label):
+    """Play one block with all stimulus generation hoisted out of the loop
+    and the RM1 write for trial i+1 pipelined into trial i's ITI."""
     print(f"\n--- Block: {block_label} ({len(trials)} trials) ---")
+
+    # ── generation is the expensive part (noise, bandpass, 2048-tap ITD
+    #    delay). The trial list is fully known up front, so build every
+    #    buffer before the block starts. Each still gets a fresh token.
+    print(f"    building {len(trials)} stimuli...", end='', flush=True)
+    sounds = [_makeSound(*trial_to_itd_ild(t)) for t in trials]
+    print(" done.")
+
+    # ── trial 0 has no preceding ITI to hide its write in, so write it here
+    _write(sounds[0])
+
     results = []
-    for t in trials:
-        time.sleep(0.2)
-        if t['anchor_cue'] == 'ITD':
-            itd, ild = t['anchor_val'], t['rove_val']
-        else:
-            itd, ild = t['rove_val'], t['anchor_val']
-        resp = play_two_tone(itd, ild)
-        t = dict(t, response=resp, block=block_label)
-        results.append(t)
+    for i, t in enumerate(trials):
+        resp, t_onset = _play()
+
+        # ── dead time starts here. Load the next buffer now so that the
+        #    next ff.play() is preceded by zero USB transfer.
+        if i + 1 < len(sounds):
+            _write(sounds[i + 1])
+
+        results.append(dict(t, response=resp, block=block_label,
+                            onset=t_onset, trial_num=i + 1))
+
+        # ── pad out to a constant trial period, measured from onset
+        precise_sleep_until(t_onset + ITI_MS / 1000)
+
     return results
 
 
@@ -263,7 +307,7 @@ def run_conditioning(cond_dim):
         is_plus = i < N_COND_TRIALS // 2
         cue     = cond_dim if is_plus else other_dim
         side    = random.choice([-1, +1])          # ← direction randomised
-        pos     = side * ANCHOR_DEG
+        pos     = side * random.choice(PROBE_VALS[1:])
         shocked = is_plus and random.random() < SHOCK_RATE
         trials.append({'is_plus': is_plus, 'cue': cue,
                        'side': side, 'pos': pos, 'shocked': shocked})
@@ -272,21 +316,37 @@ def run_conditioning(cond_dim):
     log = []
     print(f"\n--- Conditioning (CS+ = {cond_dim}, CS- = {other_dim}, "
           f"{len(trials)} trials) ---")
-    for t in trials:
-        stim = make_stimulus(t['pos'], 0) if t['cue'] == 'ITD' \
-               else make_stimulus(0, t['pos'])
+    # single-interval stimuli here (no reference, no ISI), built up front
+    stims = [make_stimulus(t['pos'], 0) if t['cue'] == 'ITD'
+             else make_stimulus(0, t['pos']) for t in trials]
+
+    _write(stims[0])
+
+    for i, t in enumerate(trials):
+        # NOTE: previously this called _play(stim) with no _write(), so every
+        # conditioning trial replayed whatever buffer the last pre-block
+        # trial had left on the RM1. The CS+/CS- manipulation never reached
+        # the hardware.
         t0 = time.time()
-        _play(stim)
+        ff.play(1, [PROC])
+
         label = 'CS+ ⚡' if t['shocked'] else ('CS+' if t['is_plus'] else 'CS-')
         print(f"  {label:>6s}  {t['cue']} {t['pos']:+5.1f}°")
+
         if t['shocked']:
+            # arm the shock BEFORE the busy-wait so the USB write is not
+            # itself part of the CS-US interval
             ff.write('num_shock', 4, PROC)
-            while time.time() < t0 + CS_US_INTERVAL / 1000:
-                pass
+            precise_sleep_until(t0 + CS_US_INTERVAL / 1000)
             ff.play(2, [PROC])
+
         ff.wait_to_finish_playing()
-        log.append(dict(t, cond_dim=cond_dim))
-        time.sleep(ITI_MS / 1000 / 2)
+
+        if i + 1 < len(stims):
+            _write(stims[i + 1])
+
+        log.append(dict(t, cond_dim=cond_dim, onset=t0, trial_num=i + 1))
+        precise_sleep_until(t0 + ITI_MS / 1000 / 2)
 
     return log
 
