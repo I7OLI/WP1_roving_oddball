@@ -373,8 +373,13 @@ def _pse_from_curve(x, p):
         return 1.0 / (1.0 + np.exp(-(x - alpha) / beta))
     try:
         from scipy.optimize import curve_fit
+        # beta is bounded positive: unbounded, the fit can converge on a
+        # NEGATIVE slope (an inverted psychometric function), report success,
+        # and hand back a meaningless PSE with no warning.
         (alpha, _beta), _ = curve_fit(
-            logistic, x, p, p0=[float(np.mean(x)), 5.0], maxfev=10000)
+            logistic, x, p, p0=[float(np.mean(x)), 5.0],
+            bounds=([x.min() - 20, 1e-3], [x.max() + 20, 100.0]),
+            maxfev=10000)
         return float(alpha)
     except Exception:
         # linear interpolation to the 0.5 crossing
@@ -383,6 +388,108 @@ def _pse_from_curve(x, p):
                 frac = (0.5 - p[i]) / (p[i + 1] - p[i])
                 return float(x[i] + frac * (x[i + 1] - x[i]))
         return float(np.interp(0.5, p, x)) if p[0] < p[-1] else None
+
+
+# ════════════════════════════════════════════════════════════════════
+# CUE WEIGHTS  —  PSE  →  relative weight of the CONDITIONED cue
+# ════════════════════════════════════════════════════════════════════
+# At the PSE the two cues cancel, so the percept is centred:
+#
+#       w_anchor * anchor_val  +  w_rove * PSE  =  0
+#   =>  w_rove / w_anchor  =  -anchor_val / PSE
+#
+# That ratio is side-invariant (anchor_val and PSE always have opposite
+# signs), which raw PSE is NOT — anchor_LEFT gives positive PSEs and
+# anchor_RIGHT negative ones, so averaging raw deltas across the two would
+# cancel a real effect out.
+
+def _condition_meta(results, condition):
+    """Recover (anchor_cue, rove_cue, anchor_val) for a condition."""
+    for r in results:
+        if r['condition'] == condition:
+            return r['anchor_cue'], r['rove_cue'], r['anchor_val']
+    return None
+
+
+def conditioned_cue_weight(results, condition, cond_dim):
+    """Normalised weight (0-1) of the CONDITIONED cue in this condition.
+
+    0.5 = both cues weighted equally. >0.5 = the conditioned cue dominates.
+    Returns (weight, pse) or (None, pse) if the fit is uninterpretable.
+    """
+    pse = fit_psychometric(results, condition)
+    meta = _condition_meta(results, condition)
+    if pse is None or meta is None or abs(pse) < 1e-6:
+        return None, pse
+
+    anchor_cue, rove_cue, anchor_val = meta
+    ratio = -anchor_val / pse            # w_rove / w_anchor
+
+    # a negative ratio means the PSE fell on the same side as the anchor:
+    # the cues did not cancel anywhere in the tested range
+    if ratio <= 0:
+        return None, pse
+
+    if cond_dim == rove_cue:
+        return ratio / (1.0 + ratio), pse
+    return 1.0 / (1.0 + ratio), pse
+
+
+def report_conditioning_effect(pre, post, cond_dim):
+    """Print whether conditioning shifted weighting toward the conditioned CUE.
+
+    The predicted signature is a DOUBLE DISSOCIATION, because the conditioned
+    cue is the anchor in half the conditions and the rover in the other half:
+
+      cond_dim is the ANCHOR  -> anchor gets stronger -> |PSE| INCREASES
+      cond_dim is the ROVER   -> less rove needed     -> |PSE| DECREASES
+
+    Both map onto the same thing once converted to weights: w_conditioned up.
+    """
+    other_dim = 'ILD' if cond_dim == 'ITD' else 'ITD'
+
+    print(f"\n=== CUE WEIGHTING: shift toward {cond_dim} (CS+) ===")
+    print(f"    weight of {cond_dim}, 0.5 = equal weighting with {other_dim}\n")
+
+    deltas = []
+    for cond in CONDITIONS:
+        w_pre,  pse_pre  = conditioned_cue_weight(pre,  cond, cond_dim)
+        w_post, pse_post = conditioned_cue_weight(post, cond, cond_dim)
+
+        role = 'anchor' if cond_dim in cond.split('_')[0] else 'rove  '
+
+        if w_pre is None or w_post is None:
+            print(f"  {cond:>18s} [{role}]:  (uninterpretable fit — "
+                  f"pse pre={pse_pre}, post={pse_post})")
+            continue
+
+        d = w_post - w_pre
+        deltas.append(d)
+        arrow = '+' if d > 0 else '-'
+        print(f"  {cond:>18s} [{role}]:  w_pre={w_pre:.3f}  w_post={w_post:.3f}"
+              f"   Δ={d:+.3f} {arrow}"
+              f"   (PSE {pse_pre:+.2f}° → {pse_post:+.2f}°)")
+
+    if not deltas:
+        print("\n  No interpretable conditions. Cannot assess the shift.")
+        return
+
+    mean_d = float(np.mean(deltas))
+    n_pos  = sum(d > 0 for d in deltas)
+
+    print(f"\n  mean Δw({cond_dim}) = {mean_d:+.3f}   "
+          f"({n_pos}/{len(deltas)} conditions in the predicted direction)")
+
+    if mean_d > 0:
+        print(f"  → weighting shifted TOWARD the conditioned cue ({cond_dim}).")
+    else:
+        print(f"  → weighting shifted AWAY from the conditioned cue "
+              f"(toward {other_dim}).")
+
+    print("\n  CAVEAT: with REPS_PER_PROBE = "
+          f"{REPS_PER_PROBE}, each PSE rests on {REPS_PER_PROBE} trials per "
+          "probe point.\n  Treat a single participant's Δ as descriptive "
+          "only — this is not a test.")
 
 
 # ════════════════════════════════════════════════════════════════════
@@ -411,6 +518,8 @@ if __name__ == '__main__':
     post = run_conflict_block(post_trials, 'post')
 
     # ── results ──
+    # raw PSEs first (diagnostic — note the sign flips between LEFT/RIGHT
+    # anchors, which is why these must not be averaged directly)
     print("\n=== PSE COMPARISON (pre → post) ===")
     for cond in CONDITIONS:
         pre_pse = fit_psychometric(pre, cond)
@@ -420,6 +529,9 @@ if __name__ == '__main__':
         else:
             print(f"  {cond:>18s}:  pre={pre_pse:+6.2f}  post={post_pse:+6.2f}"
                   f"  Δ={post_pse - pre_pse:+6.2f}°")
+
+    # the actual readout
+    report_conditioning_effect(pre, post, DIM)
 
     json.dump(pre, open(f"sub-{PID}_pre.json", 'w'), indent=2)
     json.dump(post, open(f"sub-{PID}_post.json", 'w'), indent=2)
