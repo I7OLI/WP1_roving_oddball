@@ -16,9 +16,11 @@ Three phases:
   2. Conditioning          → one cue dimension paired with shock (CS+/CS-)
   3. Post conflict block    → same conditions, look for a PSE shift
 """
-
+# %% 
 import time
 import json
+import os
+import datetime
 import random
 import numpy as np
 import slab
@@ -50,8 +52,10 @@ ANCHOR_DEG = 10           # fixed anchor position (1
 PROBE_VALS     = [0, 2.5, 5, 7.5, 10, 12.5, 15, 20]   # roving cue magnitudes
 REPS_PER_PROBE = 2       # trials per probe value per condition
 
-ITI_MS         = 1500     # inter-trial interval
+ITI_MS         = 1500     # inter-trial interval (conditioning pacing)
 RESP_TIMEOUT_MS = 2000    # response window
+POST_RESP_MS   = 200      # conflict blocks: gap AFTER response before next trial
+                          # (self-paced — fast responders get through faster)
 
 # Conditioning
 N_COND_TRIALS = 50        # total conditioning trials
@@ -61,7 +65,7 @@ CS_US_INTERVAL = 250      # ms, tone onset → shock
 CONDITIONS = ['ITD_anchor_LEFT', 'ITD_anchor_RIGHT',
               'ILD_anchor_LEFT', 'ILD_anchor_RIGHT']
 kb = keyboard.Keyboard()
-
+# %%
 # ════════════════════════════════════════════════════════════════════
 # STIMULI
 # ════════════════════════════════════════════════════════════════════
@@ -225,7 +229,8 @@ def _play():
     ff.play(1, [PROC])
     ff.wait_to_finish_playing()
     resp = get_response()
-    return resp, t_onset
+    t_resp = time.time()   # when the key landed (or the response window timed out)
+    return resp, t_onset, t_resp
 
 # ════════════════════════════════════════════════════════════════════
 # TRIAL LIST  — every condition × probe × repetition, shuffled
@@ -272,18 +277,22 @@ def run_conflict_block(trials, block_label):
 
     results = []
     for i, t in enumerate(trials):
-        resp, t_onset = _play()
+        resp, t_onset, t_resp = _play()
 
         # ── dead time starts here. Load the next buffer now so that the
-        #    next ff.play() is preceded by zero USB transfer.
+        #    next ff.play() is preceded by zero USB transfer. The USB write
+        #    is hidden inside the post-response gap below.
         if i + 1 < len(sounds):
             _write(sounds[i + 1])
 
-        results.append(dict(t, response=resp, block=block_label,
-                            onset=t_onset, trial_num=i + 1))
+        # NB: no 'block' key — it duplicated 'phase', which generate_conflict_
+        # trials already set. Two fields that must agree is one field too many.
+        results.append(dict(t, response=resp, onset=t_onset, trial_num=i + 1))
 
-        # ── pad out to a constant trial period, measured from onset
-        precise_sleep_until(t_onset + ITI_MS / 1000)
+        # ── self-paced: fixed short gap measured from the RESPONSE, not onset.
+        #    A fast responder moves on sooner; a slow one still gets the same
+        #    200 ms breather. (Timeouts pace off the end of the response window.)
+        precise_sleep_until(t_resp + POST_RESP_MS / 1000)
 
     return results
 
@@ -499,7 +508,10 @@ if __name__ == '__main__':
     print("=== WP2B — affective cue weighting ===")
     PID = input("Participant ID: ").strip()
     DIM = input("Conditioned dimension (ITD/ILD): ").strip().upper()
-    SIDE = 1 if hash(PID) % 2 == 0 else -1     # which side is CS+
+    if DIM not in ('ITD', 'ILD'):
+        raise SystemExit(f"Conditioned dimension must be ITD or ILD, got {DIM!r}")
+    # (the old `SIDE = hash(PID) % 2` is gone: Python salts string hashing per
+    #  process, so it gave a different answer every run. It was never used.)
 
     slab.set_default_samplerate(FS)
     ff.initialize(setup='headphones', device=[['RM1', PROC, RCX]],
@@ -512,7 +524,8 @@ if __name__ == '__main__':
     pre = run_conflict_block(pre_trials, 'pre')
 
     input("Enter → CONDITIONING")
-    run_conditioning(DIM)
+    conditioning = run_conditioning(DIM)   # was discarded — the whole
+                                           # conditioning log was being lost
 
     input("Enter → POST block")
     post = run_conflict_block(post_trials, 'post')
@@ -533,6 +546,40 @@ if __name__ == '__main__':
     # the actual readout
     report_conditioning_effect(pre, post, DIM)
 
-    json.dump(pre, open(f"sub-{PID}_pre.json", 'w'), indent=2)
-    json.dump(post, open(f"sub-{PID}_post.json", 'w'), indent=2)
-    print(f"\nSaved sub-{PID}_pre.json and sub-{PID}_post.json")
+    # ════════════════════════════════════════════════════════════════
+    # SAVE — one file per participant, with a metadata header
+    # ════════════════════════════════════════════════════════════════
+    # Everything needed to interpret the data now lives IN the file. The
+    # conditioned dimension in particular was previously recorded nowhere,
+    # so the analysis had no way to know which cue was CS+.
+    record = {
+        'participant_id': PID,
+        'cs_plus_dim':    DIM,
+        'cs_minus_dim':   'ILD' if DIM == 'ITD' else 'ITD',
+        'datetime':       datetime.datetime.now().isoformat(timespec='seconds'),
+        'script':         os.path.basename(__file__),
+        'config': {
+            'FS': FS, 'TONE_MS': TONE_MS, 'RAMP_MS': RAMP_MS, 'F0': F0,
+            'BANDWIDTH_OCT': BANDWIDTH_OCT, 'HEAD_RADIUS_CM': HEAD_RADIUS_CM,
+            'LEVEL': LEVEL, 'ANCHOR_DEG': ANCHOR_DEG,
+            'PROBE_VALS': PROBE_VALS, 'REPS_PER_PROBE': REPS_PER_PROBE,
+            'ITI_MS': ITI_MS, 'RESP_TIMEOUT_MS': RESP_TIMEOUT_MS,
+            'POST_RESP_MS': POST_RESP_MS,
+            'ISI_MS': len(SILENCE) / FS * 1000,
+            'N_COND_TRIALS': N_COND_TRIALS, 'SHOCK_RATE': SHOCK_RATE,
+            'CS_US_INTERVAL': CS_US_INTERVAL,
+        },
+        'pre':          pre,
+        'conditioning': conditioning,
+        'post':         post,
+    }
+
+    out_path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                            f"sub-{PID}_WP2B.json")
+    with open(out_path, 'w') as f:
+        json.dump(record, f, indent=2)
+
+    n_shocked = sum(t['shocked'] for t in conditioning)
+    print(f"\nSaved {out_path}")
+    print(f"  pre={len(pre)} trials | conditioning={len(conditioning)} "
+          f"({n_shocked} shocked) | post={len(post)} trials")

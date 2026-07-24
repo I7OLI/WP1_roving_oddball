@@ -39,8 +39,13 @@ import numpy as np
 #  CONFIG  —  edit these, then Run
 # ════════════════════════════════════════════════════════════════════
 
-# Where the sub-*_pre.json / sub-*_post.json files live.
-DATA_DIR = '/Users/oliver/PycharmProjects/WP1_roving_oddball'
+# Where the result files live.
+#   ''  (empty)  ->  the folder this script is in. Works on any machine.
+#   otherwise    ->  an absolute path, e.g.
+#                    Mac      '/Users/oliver/PycharmProjects/WP1_roving_oddball'
+#                    Windows  r'C:\Users\oliver\WP1_roving_oddball'
+#                    (note the r'...' on Windows, or backslashes get eaten)
+DATA_DIR = ''
 
 # Which participant to analyse.
 #   None  ->  every pre/post pair in DATA_DIR, plus a group summary
@@ -49,17 +54,21 @@ DATA_DIR = '/Users/oliver/PycharmProjects/WP1_roving_oddball'
 SUBJECT = None
 
 # Which cue was CS+ during conditioning: 'ITD' or 'ILD'.
+# NOTE: new-format sub-*_WP2B.json files record this themselves, and the
+# value in the file always wins. This setting is only a fallback for the
+# OLD split sub-*_pre.json / sub-*_post.json files, which stored no such
+# field — for those you have to supply it from your lab notes.
 COND_DIM = 'ITD'
 
-# If different participants got different conditioned cues, list the
-# exceptions here. Anything not listed uses COND_DIM above.
+# Per-subject overrides for that fallback, if participants differed.
 #   e.g.  SUBJECT_DIMS = {'2': 'ILD', '5': 'ILD'}
 SUBJECT_DIMS = {}
 
-# Filename pattern. Change only if you renamed your output files.
-PRE_SUFFIX  = '_pre.json'
-POST_SUFFIX = '_post.json'
-SUBJECT_PREFIX = 'sub-'
+# Filename patterns. Both layouts are read automatically.
+COMBINED_SUFFIX = '_WP2B.json'      # new: one file, metadata included
+PRE_SUFFIX      = '_pre.json'       # legacy split files
+POST_SUFFIX     = '_post.json'
+SUBJECT_PREFIX  = 'sub-'
 
 # ════════════════════════════════════════════════════════════════════
 
@@ -216,68 +225,134 @@ def analyse(pre, post, cond_dim, label=''):
 # MAIN
 # ════════════════════════════════════════════════════════════════════
 
-def find_pairs():
-    """Collect (subject_id, pre_path, post_path) using the CONFIG block."""
-    folder = os.path.expanduser(DATA_DIR)
-    if not os.path.isdir(folder):
-        raise SystemExit(f"DATA_DIR does not exist:\n    {folder}\n"
-                         f"Edit DATA_DIR at the top of this file.")
-
-    # which subjects to look at
+def _wanted_subjects():
     if SUBJECT is None:
-        wanted = None
-    elif isinstance(SUBJECT, str):
-        wanted = [SUBJECT]
-    else:
-        wanted = list(SUBJECT)
+        return None
+    if isinstance(SUBJECT, str):
+        return [SUBJECT]
+    return list(SUBJECT)
 
-    pairs = []
-    for pre_path in sorted(glob.glob(os.path.join(folder, '*' + PRE_SUFFIX))):
-        stem = os.path.basename(pre_path)[:-len(PRE_SUFFIX)]        # 'sub-1'
-        sid  = stem[len(SUBJECT_PREFIX):] if stem.startswith(SUBJECT_PREFIX) else stem
 
+def find_sessions():
+    """Return [(sid, label, pre, post, cs_plus_dim, dim_source)].
+
+    Reads the new combined sub-*_WP2B.json AND the legacy split
+    sub-*_pre.json / sub-*_post.json, so old data still works.
+    """
+    here = os.path.dirname(os.path.abspath(__file__))
+    folder = os.path.expanduser(DATA_DIR) if DATA_DIR else here
+
+    if not os.path.isdir(folder):
+        msg = [f"DATA_DIR does not exist:", f"    {folder}", ""]
+        msg.append(f"This script lives in:")
+        msg.append(f"    {here}")
+        msg.append(f"Working directory is:")
+        msg.append(f"    {os.getcwd()}")
+        # where ARE the result files? look in the obvious places
+        found = []
+        for cand in {here, os.getcwd(), os.path.expanduser('~')}:
+            for pat in (COMBINED_SUFFIX, PRE_SUFFIX):
+                hits = glob.glob(os.path.join(cand, '*' + pat))
+                if hits:
+                    found.append((cand, len(hits)))
+                    break
+        if found:
+            msg.append("")
+            msg.append("Result files were found in:")
+            for cand, n in found:
+                msg.append(f"    {cand}   ({n} file(s))")
+            msg.append("")
+            msg.append("Set DATA_DIR to one of those, or DATA_DIR = '' "
+                       "to use the script's own folder.")
+        else:
+            msg.append("")
+            msg.append("No WP2B result files found nearby either. Search for "
+                       "them with:")
+            msg.append("    find ~ -name 'sub-*_WP2B.json' -o -name "
+                       "'sub-*_pre.json'")
+        raise SystemExit("\n".join(msg))
+
+    wanted = _wanted_subjects()
+    sessions, seen = [], set()
+
+    def sid_of(stem):
+        return stem[len(SUBJECT_PREFIX):] if stem.startswith(SUBJECT_PREFIX) else stem
+
+    # ── new combined format (preferred) ──
+    for path in sorted(glob.glob(os.path.join(folder, '*' + COMBINED_SUFFIX))):
+        stem = os.path.basename(path)[:-len(COMBINED_SUFFIX)]
+        sid = sid_of(stem)
         if wanted is not None and sid not in wanted and stem not in wanted:
             continue
-
-        post_path = pre_path[:-len(PRE_SUFFIX)] + POST_SUFFIX
-        if os.path.exists(post_path):
-            pairs.append((sid, pre_path, post_path))
+        with open(path) as f:
+            rec = json.load(f)
+        dim = rec.get('cs_plus_dim')
+        if dim not in ('ITD', 'ILD'):
+            print(f"  ! {os.path.basename(path)}: no valid 'cs_plus_dim' "
+                  f"— falling back to CONFIG")
+            dim, src = SUBJECT_DIMS.get(sid, COND_DIM), 'CONFIG'
         else:
+            src = 'file'
+        sessions.append((sid, stem, rec['pre'], rec['post'], dim, src))
+        seen.add(sid)
+
+    # ── legacy split format ──
+    for pre_path in sorted(glob.glob(os.path.join(folder, '*' + PRE_SUFFIX))):
+        stem = os.path.basename(pre_path)[:-len(PRE_SUFFIX)]
+        sid = sid_of(stem)
+        if wanted is not None and sid not in wanted and stem not in wanted:
+            continue
+        if sid in seen:
+            print(f"  ! {stem}: combined file already loaded, "
+                  f"ignoring legacy {PRE_SUFFIX}/{POST_SUFFIX}")
+            continue
+        post_path = pre_path[:-len(PRE_SUFFIX)] + POST_SUFFIX
+        if not os.path.exists(post_path):
             print(f"  ! {os.path.basename(pre_path)} has no "
                   f"{POST_SUFFIX} partner — skipping")
-
-    # flag orphaned post files rather than silently ignoring them
-    for post_path in sorted(glob.glob(os.path.join(folder, '*' + POST_SUFFIX))):
-        if not os.path.exists(post_path[:-len(POST_SUFFIX)] + PRE_SUFFIX):
-            print(f"  ! {os.path.basename(post_path)} has no "
-                  f"{PRE_SUFFIX} partner — skipping")
-
-    if not pairs:
-        if wanted is not None:
-            raise SystemExit(
-                f"No files matching SUBJECT = {SUBJECT!r} in:\n    {folder}\n"
-                f"Expected e.g. {SUBJECT_PREFIX}{wanted[0]}{PRE_SUFFIX}")
-        raise SystemExit(f"No *{PRE_SUFFIX} files found in:\n    {folder}")
-
-    return pairs
-
-
-def main():
-    pairs = find_pairs()
-    print(f"\nDATA_DIR : {DATA_DIR}")
-    print(f"SUBJECT  : {'all' if SUBJECT is None else SUBJECT}")
-    print(f"Found {len(pairs)} pre/post pair(s).")
-
-    summary = []
-    for sid, pre_path, post_path in pairs:
+            continue
         with open(pre_path) as f:
             pre = json.load(f)
         with open(post_path) as f:
             post = json.load(f)
+        sessions.append((sid, stem, pre, post,
+                         SUBJECT_DIMS.get(sid, COND_DIM), 'CONFIG'))
+        seen.add(sid)
 
-        dim = SUBJECT_DIMS.get(sid, COND_DIM)
-        label = os.path.basename(pre_path)[:-len(PRE_SUFFIX)]
-        out = analyse(pre, post, dim, label)
+    for post_path in sorted(glob.glob(os.path.join(folder, '*' + POST_SUFFIX))):
+        stem = os.path.basename(post_path)[:-len(POST_SUFFIX)]
+        if sid_of(stem) not in seen and not os.path.exists(
+                post_path[:-len(POST_SUFFIX)] + PRE_SUFFIX):
+            print(f"  ! {os.path.basename(post_path)} has no "
+                  f"{PRE_SUFFIX} partner — skipping")
+
+    if not sessions:
+        if wanted is not None:
+            raise SystemExit(
+                f"No files matching SUBJECT = {SUBJECT!r} in:\n    {folder}\n"
+                f"Expected {SUBJECT_PREFIX}{wanted[0]}{COMBINED_SUFFIX} "
+                f"or {SUBJECT_PREFIX}{wanted[0]}{PRE_SUFFIX}")
+        raise SystemExit(f"No WP2B result files found in:\n    {folder}")
+
+    return sessions
+
+
+def main():
+    sessions = find_sessions()
+    print(f"\nDATA_DIR : {DATA_DIR}")
+    print(f"SUBJECT  : {'all' if SUBJECT is None else SUBJECT}")
+    print(f"Found {len(sessions)} session(s).")
+
+    if any(src == 'CONFIG' for *_, src in sessions):
+        print(f"\n  NOTE: some sessions have no CS+ recorded in the file.\n"
+              f"  For those, CS+ is assumed to be COND_DIM = {COND_DIM!r} "
+              f"(see SUBJECT_DIMS).\n"
+              f"  If that is wrong, the sign of every weighting result "
+              f"for them is wrong.")
+
+    summary = []
+    for sid, label, pre, post, dim, src in sessions:
+        out = analyse(pre, post, dim, f"{label}   [CS+ from {src}]")
         if out:
             summary.append(out)
 
