@@ -73,6 +73,28 @@ import numpy as np
 
 
 # ============================================================================
+#  >>>  STUDY FOLDER — SET THIS  <<<
+# ============================================================================
+# Everything for one study lives in here. Point it at a piloting folder now,
+# a real-experiment folder later. Created automatically if it doesn't exist.
+#
+#     <STUDY_DIR>/allocation.csv    who gets which order + which CS+
+#     <STUDY_DIR>/sequences/        the .npy / .json / .csv this script writes
+#     <STUDY_DIR>/data/             behavioural CSVs from the run script
+#     <STUDY_DIR>/pupil/            pupil recordings from the run script
+#
+# NOTE: the same line exists at the top of WP1_run_Exp_v2.py and
+# WP1_balance.py. Change all three when you switch studies. Each script prints
+# the folder it is using when it starts, so a mismatch is visible immediately.
+
+STUDY_DIR = 'studies/pilot'
+
+# ----------------------------------------------------------------------------
+SEQ_DIR = os.path.join(STUDY_DIR, 'sequences')
+ALLOCATION_FILE = os.path.join(STUDY_DIR, 'allocation.csv')
+
+
+# ============================================================================
 # EXPERIMENT CONFIG (shared across all participants)
 # ============================================================================
 ITI = 0.2
@@ -374,25 +396,38 @@ def generate_reinforcement_schedule(sequence, cs_plus_value, n_shock=100,
 # ============================================================================
 def get_cs_plus_assignment(participant_id):
     """
-    Returns the CS+ direction (+1 or -1) for all 3 stimulus dimensions
-    to ensure perfect counterbalancing every 8 participants.
+    CS+ direction (+1 / -1) per stimulus dimension, read from allocation.csv
+    in the study folder. That file is the single source of truth for both
+    session order and CS+ assignment — build it with:
+
+        python WP1_balance.py --n 24
 
     Mappings:
     f: +1 (High) / -1 (Low)
     p: +1 (Right) / -1 (Left)
     a: +1 (Up)    / -1 (Down)
     """
-    combos = [
-        {'f': 1, 'p': 1, 'a': 1},     # 1: High, Right, Up
-        {'f': 1, 'p': 1, 'a': -1},    # 2: High, Right, Down
-        {'f': 1, 'p': -1, 'a': 1},    # 3: High, Left,  Up
-        {'f': 1, 'p': -1, 'a': -1},   # 4: High, Left,  Down
-        {'f': -1, 'p': 1, 'a': 1},    # 5: Low,  Right, Up
-        {'f': -1, 'p': 1, 'a': -1},   # 6: Low,  Right, Down
-        {'f': -1, 'p': -1, 'a': 1},   # 7: Low,  Left,  Up
-        {'f': -1, 'p': -1, 'a': -1},  # 8: Low,  Left,  Down
-    ]
-    return combos[(participant_id - 1) % 8]
+    return read_allocation()[int(participant_id)]['cs_plus']
+
+
+def read_allocation():
+    """{participant_id: {'order_code', 'session_types', 'cs_plus'}} from the study folder."""
+    if not os.path.exists(ALLOCATION_FILE):
+        raise SystemExit(
+            f"\nERROR: no allocation table at '{ALLOCATION_FILE}'.\n"
+            f"Run:  python WP1_balance.py --n 24\n")
+    out = {}
+    with open(ALLOCATION_FILE, newline='') as f:
+        for r in csv.DictReader(f):
+            out[int(r['participant_id'])] = {
+                'order_code': r['order_code'],
+                'session_types': [r['session_1_type'], r['session_2_type'],
+                                  r['session_3_type']],
+                'cs_plus': {'f': int(r['cs_plus_f']),
+                            'p': int(r['cs_plus_p']),
+                            'a': int(r['cs_plus_a'])},
+            }
+    return out
 
 
 # ============================================================================
@@ -603,16 +638,23 @@ def build_block(n_deviants, modalities, cs_plus_modality, cs_plus_value,
 # ============================================================================
 # BUILD ONE PARTICIPANT
 # ============================================================================
-def generate_one_v2(participant_id, exp_type, seed, out_dir='.'):
+def generate_one_v2(participant_id, exp_type, seed, out_dir=SEQ_DIR):
     random.seed(seed)
     np.random.seed(seed)
+
+    os.makedirs(out_dir, exist_ok=True)
 
     tcfg = TYPE_CONFIG[exp_type]
     modalities = tcfg['modalities']
     cs_plus_modality = tcfg['cs_plus_modality']
 
-    # CS+ direction per modality (counterbalanced every 8 participants).
-    assignment = get_cs_plus_assignment(participant_id)  # {'f':±1,'p':±1,'a':±1}
+    # CS+ direction per modality, from the study folder's allocation.csv.
+    alloc = read_allocation()
+    if int(participant_id) not in alloc:
+        raise SystemExit(f"\nERROR: participant {participant_id} is not in "
+                         f"'{ALLOCATION_FILE}'. Extend it with WP1_balance.py.\n")
+    alloc_row = alloc[int(participant_id)]
+    assignment = alloc_row['cs_plus']                    # {'f':±1,'p':±1,'a':±1}
     cs_plus_value = assignment[cs_plus_modality]
 
     # Timing depends on the session type: pattern trials are longer on air and
@@ -723,8 +765,12 @@ def generate_one_v2(participant_id, exp_type, seed, out_dir='.'):
         # One rule for single tones and patterns alike.
         'shock_delay_after_offset': SHOCK_DELAY_AFTER_OFFSET,
         'shock_time_from_onset': stim_span + SHOCK_DELAY_AFTER_OFFSET,
-        # per-modality CS+ assignment
+        # per-modality CS+ assignment, and where it came from
         'cs_plus_assignment': {k: int(v) for k, v in assignment.items()},
+        'order_code': alloc_row['order_code'],
+        'session_number': (alloc_row['session_types'].index(exp_type) + 1
+                           if exp_type in alloc_row['session_types'] else None),
+        'study_dir': STUDY_DIR,
         # block layout
         'blocks': block_table,
     })
@@ -824,8 +870,7 @@ if __name__ == '__main__':
     # ---- Single mode ----
     if args.participant is not None:
         exp_type = args.experiment_type or prompt_for_type()
-        out_dir = 'sequences'
-        os.makedirs(out_dir, exist_ok=True)
+        out_dir = SEQ_DIR
         info = generate_one_v2(args.participant, exp_type, base_seed, out_dir=out_dir)
         print(f"\nDone: {info['npy']}")
 
@@ -833,8 +878,7 @@ if __name__ == '__main__':
     elif args.n_participants is not None:
         n = args.n_participants
         exp_types = [args.experiment_type] if args.experiment_type else TYPES
-        out_dir = f"WP1_sequences_v2_n{n}"
-        os.makedirs(out_dir, exist_ok=True)
+        out_dir = SEQ_DIR
 
         print(f"\n{'#' * 70}")
         print(f"  BATCH GENERATION (v2): {n} participants x types {exp_types}")
@@ -863,7 +907,6 @@ if __name__ == '__main__':
         print("=== WP1 Sequence Generator (v2) ===")
         participant_id = int(input("Enter participant number: "))
         exp_type = prompt_for_type()
-        out_dir = 'sequences'
-        os.makedirs(out_dir, exist_ok=True)
+        out_dir = SEQ_DIR
         info = generate_one_v2(participant_id, exp_type, base_seed, out_dir=out_dir)
         print(f"\nDone! Sequence saved to: {info['npy']}")

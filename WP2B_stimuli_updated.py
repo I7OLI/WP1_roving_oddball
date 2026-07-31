@@ -52,15 +52,26 @@ ANCHOR_DEG = 10           # fixed anchor position (1
 PROBE_VALS     = [0, 2.5, 5, 7.5, 10, 12.5, 15, 20]   # roving cue magnitudes
 REPS_PER_PROBE = 2       # trials per probe value per condition
 
-ITI_MS         = 1500     # inter-trial interval (conditioning pacing)
+# Conditioning ITI is JITTERED so the US is not perfectly predictable in
+# time. (The old code used a single ITI_MS = 1500 and then slept to
+# `t0 + ITI_MS/1000/2`, i.e. 750 ms from tone onset — half the advertised
+# value, fixed, with 1500 written into the saved config regardless.)
+ITI_MIN_MS     = 1500
+ITI_MAX_MS     = 2500
 RESP_TIMEOUT_MS = 2000    # response window
 POST_RESP_MS   = 200      # conflict blocks: gap AFTER response before next trial
                           # (self-paced — fast responders get through faster)
 
 # Conditioning
-N_COND_TRIALS = 50        # total conditioning trials
-SHOCK_RATE    = 0.85       # CS+ reinforcement rate
+# N_COND_TRIALS must be divisible by 4 * len(PROBE_VALS[1:]) = 28 so that
+# side × magnitude is fully crossed within BOTH CS+ and CS-. 56 gives
+# 28 per CS type = 14 per side, of which 12/12 are reinforced (85.7%).
+N_COND_TRIALS = 56        # total conditioning trials
+SHOCK_RATE    = 0.85      # CS+ reinforcement rate (realised: 12/14 = 85.7%)
 CS_US_INTERVAL = 250      # ms, tone onset → shock
+MAX_SAME_SIDE_RUN = 4     # sequence constraint: consecutive same-side trials
+MAX_UNREINF_RUN   = 2     # sequence constraint: consecutive unreinforced CS+
+ORDER_MAX_TRIES   = 5000  # rejection-sampling budget for the above
 
 CONDITIONS = ['ITD_anchor_LEFT', 'ITD_anchor_RIGHT',
               'ILD_anchor_LEFT', 'ILD_anchor_RIGHT']
@@ -300,27 +311,104 @@ def run_conflict_block(trials, block_label):
 # ════════════════════════════════════════════════════════════════════
 # CONDITIONING  (one cue dimension → CS+ shocked / CS- safe)
 # ════════════════════════════════════════════════════════════════════
+def _balanced_cs_set(cue, is_plus, n):
+    """Fully crossed side × magnitude trial set for ONE CS type.
+
+    Every (side, magnitude) cell gets an equal number of trials, so
+    `n` must be divisible by 2 * len(PROBE_VALS[1:]).
+
+    For CS+, reinforcement is allocated as a FIXED count split evenly
+    across sides rather than an independent coin flip per trial.
+    """
+    mags    = PROBE_VALS[1:]
+    n_cells = 2 * len(mags)
+    if n % n_cells:
+        raise ValueError(
+            f"{n} trials per CS type does not divide into {n_cells} "
+            f"(side × magnitude) cells. Set N_COND_TRIALS to a multiple "
+            f"of {2 * n_cells}.")
+    reps = n // n_cells
+
+    trials = []
+    for side in (-1, +1):
+        for m in mags:
+            for _ in range(reps):
+                trials.append({'is_plus': is_plus, 'cue': cue, 'side': side,
+                               'pos': side * m, 'shocked': False})
+    if not is_plus:
+        return trials
+
+    per_side  = n // 2
+    n_sh_side = int(round(SHOCK_RATE * per_side))
+    for side in (-1, +1):
+        idx = [i for i, t in enumerate(trials) if t['side'] == side]
+        random.shuffle(idx)
+        for i in idx[:n_sh_side]:          # which magnitudes go unreinforced
+            trials[i]['shocked'] = True    # is left random — only 2/side
+    return trials
+
+
+def _order_ok(order):
+    """Sequence constraints: no long laterality runs, no extinction streaks."""
+    run_side = run_unreinf = 1
+    if order[0]['is_plus'] and not order[0]['shocked']:
+        return False                       # don't open on an unreinforced CS+
+    for a, b in zip(order, order[1:]):
+        run_side = run_side + 1 if a['side'] == b['side'] else 1
+        if run_side > MAX_SAME_SIDE_RUN:
+            return False
+        b_unreinf = b['is_plus'] and not b['shocked']
+        a_unreinf = a['is_plus'] and not a['shocked']
+        run_unreinf = run_unreinf + 1 if (a_unreinf and b_unreinf) else 1
+        if run_unreinf > MAX_UNREINF_RUN:
+            return False
+    return True
+
+
 def run_conditioning(cond_dim):
     """Condition a cue TYPE, not a side.
 
     cond_dim : 'ITD' or 'ILD' — the cue type that is CS+ (shocked).
-    The other cue type is CS- (safe). Direction (left/right) is
-    randomised within BOTH CS+ and CS-, so laterality is not the
-    conditioned feature: the participant learns which *cue type*
-    predicts shock, not which side.
+    The other cue type is CS- (safe).
+
+    Laterality is COUNTERBALANCED, not merely randomised. Previously side
+    was drawn per trial with random.choice([-1, +1]) and shock with an
+    independent Bernoulli(SHOCK_RATE); over 20k simulated participants that
+    left the *shocked* subset lateralised by ≥4 trials in 44% of runs and
+    ≥6 in 23%. Because the DV is a signed PSE shift, a lateralised US
+    schedule induces side-specific threat learning that loads unequally on
+    the anchor_LEFT vs anchor_RIGHT conditions — precisely the confound the
+    cue-weight measure assumes away. Side and magnitude are now fully
+    crossed within each CS type, and the reinforced subset is split evenly
+    across sides by construction.
     """
     other_dim = 'ILD' if cond_dim == 'ITD' else 'ITD'
+    n_each    = N_COND_TRIALS // 2
 
-    trials = []
-    for i in range(N_COND_TRIALS):
-        is_plus = i < N_COND_TRIALS // 2
-        cue     = cond_dim if is_plus else other_dim
-        side    = random.choice([-1, +1])          # ← direction randomised
-        pos     = side * random.choice(PROBE_VALS[1:])
-        shocked = is_plus and random.random() < SHOCK_RATE
-        trials.append({'is_plus': is_plus, 'cue': cue,
-                       'side': side, 'pos': pos, 'shocked': shocked})
-    random.shuffle(trials)
+    trials = (_balanced_cs_set(cond_dim,  True,  n_each) +
+              _balanced_cs_set(other_dim, False, n_each))
+
+    for _ in range(ORDER_MAX_TRIES):
+        random.shuffle(trials)
+        if _order_ok(trials):
+            break
+    else:
+        print(f"  ! no ordering met the run-length constraints in "
+              f"{ORDER_MAX_TRIES} tries — using an unconstrained shuffle")
+        random.shuffle(trials)
+
+    for t in trials:                       # jittered ITI, drawn up front
+        t['iti_ms'] = random.uniform(ITI_MIN_MS, ITI_MAX_MS)
+
+    # realised balance — printed and saved so it can be checked post hoc
+    plus    = [t for t in trials if t['is_plus']]
+    shocked = [t for t in plus if t['shocked']]
+    print(f"  balance check — CS+ L/R: "
+          f"{sum(t['side'] < 0 for t in plus)}/{sum(t['side'] > 0 for t in plus)}"
+          f" | shocked L/R: "
+          f"{sum(t['side'] < 0 for t in shocked)}/{sum(t['side'] > 0 for t in shocked)}"
+          f" | reinforcement: {len(shocked)}/{len(plus)} "
+          f"({len(shocked) / len(plus):.1%})")
 
     log = []
     print(f"\n--- Conditioning (CS+ = {cond_dim}, CS- = {other_dim}, "
@@ -355,7 +443,7 @@ def run_conditioning(cond_dim):
             _write(stims[i + 1])
 
         log.append(dict(t, cond_dim=cond_dim, onset=t0, trial_num=i + 1))
-        precise_sleep_until(t0 + ITI_MS / 1000 / 2)
+        precise_sleep_until(t0 + t['iti_ms'] / 1000)
 
     return log
 
@@ -563,11 +651,14 @@ if __name__ == '__main__':
             'BANDWIDTH_OCT': BANDWIDTH_OCT, 'HEAD_RADIUS_CM': HEAD_RADIUS_CM,
             'LEVEL': LEVEL, 'ANCHOR_DEG': ANCHOR_DEG,
             'PROBE_VALS': PROBE_VALS, 'REPS_PER_PROBE': REPS_PER_PROBE,
-            'ITI_MS': ITI_MS, 'RESP_TIMEOUT_MS': RESP_TIMEOUT_MS,
+            'ITI_MIN_MS': ITI_MIN_MS, 'ITI_MAX_MS': ITI_MAX_MS,
+            'RESP_TIMEOUT_MS': RESP_TIMEOUT_MS,
             'POST_RESP_MS': POST_RESP_MS,
             'ISI_MS': len(SILENCE) / FS * 1000,
             'N_COND_TRIALS': N_COND_TRIALS, 'SHOCK_RATE': SHOCK_RATE,
             'CS_US_INTERVAL': CS_US_INTERVAL,
+            'MAX_SAME_SIDE_RUN': MAX_SAME_SIDE_RUN,
+            'MAX_UNREINF_RUN': MAX_UNREINF_RUN,
         },
         'pre':          pre,
         'conditioning': conditioning,

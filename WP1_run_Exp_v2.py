@@ -49,6 +49,32 @@ except ImportError:
     zmq = serializer = None
 
 # ============================================================================
+#  >>>  STUDY FOLDER — SET THIS  <<<
+# ============================================================================
+# Everything for one study lives in here. Sequences are read from it, and all
+# data written back into it. Point it at a piloting folder now, a real
+# experiment folder later.
+#
+#     <STUDY_DIR>/sequences/   .npy / .json written by WP1_generate_seq_v2.py
+#     <STUDY_DIR>/data/        behavioural CSV + _meta.json written here
+#     <STUDY_DIR>/pupil/       pupil recordings written here
+#
+# NOTE: the same line exists at the top of WP1_generate_seq_v2.py and
+# WP1_balance.py. Change all three when you switch studies. The folder in use
+# is printed at startup, so a mismatch is visible immediately.
+#
+# PUPIL: <STUDY_DIR>/pupil is handed to Pupil Capture as its rec_root_dir, so
+# STUDY_DIR must be a path valid ON THIS MACHINE. A network share Capture
+# cannot see will fail to record.
+
+STUDY_DIR = 'studies/pilot'
+
+# ----------------------------------------------------------------------------
+SEQ_DIR = os.path.join(STUDY_DIR, 'sequences')
+DATA_DIR = os.path.join(STUDY_DIR, 'data')
+PUPIL_DIR = os.path.join(STUDY_DIR, 'pupil')
+
+# ============================================================================
 # PUPIL TOGGLE
 # ============================================================================
 # Set this to False to run WITHOUT the Pupil Labs eye-tracker (no recording,
@@ -427,7 +453,7 @@ def resolve_seq_file(seq_file):
     t = input("Enter session type (f / p / a / bf / bp): ").strip().lower()
     while t not in ('f', 'p', 'a', 'bf', 'bp'):
         t = input("  Invalid — enter f, p, a, bf, or bp: ").strip().lower()
-    path = os.path.join('sequences', f"WP1_sub{pid:03d}_{t}_v2_seq.npy")
+    path = os.path.join(SEQ_DIR, f"WP1_sub{pid:03d}_{t}_v2_seq.npy")
     if not os.path.exists(path):
         sys.exit(f"\nERROR: '{path}' not found. Run WP1_generate_seq_v2.py first.")
     print(f"Found sequence file: {path}\n")
@@ -476,6 +502,7 @@ if __name__ == '__main__':
                  f"SOA is only {SOA:.3f}s. Check the timing in {json_file}.")
 
     print(f"\n{'=' * 70}\nWP1 EXPERIMENT (v2)\n{'=' * 70}")
+    print(f"Study folder:    {os.path.abspath(STUDY_DIR)}")
     print(f"Sequence file:   {npy_file}")
     print(f"Participant ID:  {participant_id}")
     print(f"Session type:    {exp_type}  (CS+ modality = {meta.get('cs_plus_modality')})")
@@ -489,9 +516,8 @@ if __name__ == '__main__':
     print(f"Seed:            {meta.get('random_seed', 'unknown')}")
     print(f"Pupil recording: {'ON' if use_pupil else 'OFF'}\n{'=' * 70}\n")
 
-    recording_dir = os.path.join(
-        r"C:\Users\neurobio\Projects\WP1_roving_oddball\recordings",
-        f"sub{participant_id:03d}_{exp_type}_v2")
+    recording_dir = os.path.join(PUPIL_DIR, f"sub{participant_id:03d}_{exp_type}_v2")
+    os.makedirs(DATA_DIR, exist_ok=True)
 
     if use_pupil:
         pupil_remote, pub_socket = connect_to_pupil()
@@ -526,7 +552,9 @@ if __name__ == '__main__':
     print(f"\n{'=' * 70}\nEXPERIMENT COMPLETE\n{'=' * 70}")
 
     # --- Save behavioural CSV + metadata sidecar ---------------------------
-    csv_filename = f"WP1_sub{participant_id:03d}_{exp_type}_v2_{time.strftime('%Y%m%d_%H%M%S')}.csv"
+    csv_filename = os.path.join(
+        DATA_DIR,
+        f"WP1_sub{participant_id:03d}_{exp_type}_v2_{time.strftime('%Y%m%d_%H%M%S')}.csv")
     with open(csv_filename, 'w', newline='') as f:
         writer = csv.DictWriter(f, fieldnames=trial_log[0].keys())
         writer.writeheader()
