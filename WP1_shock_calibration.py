@@ -17,7 +17,7 @@ dial setting against whatever ceiling your ethics approval specifies.
 """
 
 import time
-
+import numpy as np
 import slab
 import freefield as ff
 from psychopy.hardware import keyboard
@@ -33,7 +33,26 @@ procsser  = 'RM1'
 MAX_PULSES   = 5      # hard ceiling; presses above this are REFUSED, not clamped
 MIN_INTERVAL = 1.0    # s, lockout so a double-press can't fire back-to-back
 
-VALID_KEYS = [str(n) for n in range(1, MAX_PULSES + 1)] + ['r', 'escape']
+VALID_KEYS = [str(n) for n in range(1, MAX_PULSES + 1)] + ['r', 'escape', 't']
+
+def load_tone(tone):
+    """
+    Write one binaural stimulus into the RM1 play buffer.
+
+    Applies OUTPUT_SCALE equally to both channels — a single global gain, so
+    the interaural level difference (the azimuth cue) is preserved exactly.
+    Buffers are flattened to 1-D, since tone.left.data is a (n, 1) column.
+    """
+    left = np.asarray(tone.left.data, dtype=float).flatten()
+    right = np.asarray(tone.right.data, dtype=float).flatten()
+
+    ff.write('playbuflen', len(tone), procsser)
+    ff.write('data_l', left, procsser)
+    ff.write('chan_l', 1, procsser)
+    ff.write('data_r', right, procsser)
+    ff.write('chan_r', 2, procsser)
+
+TestTone = slab.Sound.tone(frequency=700, duration=100, n_channels=2)
 
 
 # ════════════════════════════════════════════════════════════════════
@@ -85,7 +104,10 @@ try:
             note = input("  note/rating for last delivery: ").strip()
             log[-1]['note'] = note
             continue
-
+        if name == 't':
+            load_tone(TestTone)
+            ff.play(1, [procsser])
+            ff.wait_to_finish_playing()
         n_pulses = int(name)
 
         # refuse rather than silently substitute: if you press 8 and it fires 1,
