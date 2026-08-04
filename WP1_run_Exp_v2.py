@@ -59,9 +59,9 @@ except ImportError:
 #     <STUDY_DIR>/data/        behavioural CSV + _meta.json written here
 #     <STUDY_DIR>/pupil/       pupil recordings written here
 #
-# NOTE: the same line exists at the top of WP1_generate_seq_v2.py and
-# WP1_balance.py. Change all three when you switch studies. The folder in use
-# is printed at startup, so a mismatch is visible immediately.
+# NOTE: the same line exists at the top of WP1_generate_seq_v2.py. Change both
+# when you switch studies. The folder in use is printed at startup, so a
+# mismatch is visible immediately.
 #
 # PUPIL: <STUDY_DIR>/pupil is handed to Pupil Capture as its rec_root_dir, so
 # STUDY_DIR must be a path valid ON THIS MACHINE. A network share Capture
@@ -413,11 +413,13 @@ def run_block(block_meta, trials, participant_id, SOA, trial_log,
         if i + 1 < n:                               # preload next tone during SOA
             load_tone(trials[i + 1]['tone'])
 
+        shock_ts = ''                               # actual shock delivery time
         if shocked:                                 # fire the runtime intensity
             precise_sleep_until(t_onset + shock_time)
             ff.write('num_shock', n_pulses, procsser)
             ff.play(2, [procsser])
-            send_annotation(pub_socket, "shock", clock_offset, local_timestamp=time.time(),
+            shock_ts = time.time()
+            send_annotation(pub_socket, "shock", clock_offset, local_timestamp=shock_ts,
                             extra={"block": block_num, "trial": i + 1, "num_shock": n_pulses})
 
         precise_sleep_until(t_onset + SOA)
@@ -433,6 +435,9 @@ def run_block(block_meta, trials, participant_id, SOA, trial_log,
             'trial_type': t['cs_label'], 'freq_hz': t['freq_hz'], 'azi_deg': t['azi_deg'],
             'is_cs_plus': t['is_cs_plus'], 'shock_amount': n_pulses,
             'shock_delivered': shocked, 'timestamp': t_onset,
+            'shock_timestamp': shock_ts,
+            'shock_pupil_timestamp': (shock_ts + clock_offset) if shocked else '',
+            'shock_latency': (shock_ts - t_onset) if shocked else '',
         })
 
     send_annotation(pub_socket, f"block_{block_num}_end", clock_offset, extra={"block_label": label})
@@ -538,7 +543,7 @@ if __name__ == '__main__':
         n_devs = sum(t['step'] != 0 for t in trials)
         print(f"\n>>> PREPARING {block_meta['label']} <<<")
         print(f"    {len(trials)} trials, {n_devs} deviants")
-        input(f"\nPress Enter to start {block_meta['label']}...")
+        # input(f"\nPress Enter to start {block_meta['label']}...")
 
         run_block(block_meta, trials, participant_id, SOA, trial_log,
                   pub_socket, clock_offset, shock_time)
